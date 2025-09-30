@@ -1,0 +1,29 @@
+{
+  "name": "gmail-service",
+  "version": "1.0.0",
+  "description": "Gmail API integration service for Smart Assistant",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "NODE_ENV=production node --env-file=.env --enable-source-maps ./dist/index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": ["gmail", "api", "email", "assistant"],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@types/node": "^22.10.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.4.1",
+    "googleapis": "^144.0.0",
+    "helmet": "^8.0.0",
+    "jsonwebtoken": "^9.0.2",
+    "nodemailer": "^6.9.18",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
