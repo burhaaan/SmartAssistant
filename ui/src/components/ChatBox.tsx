@@ -32,7 +32,7 @@ export default function ChatBox() {
   // Voice output states
   const [playingMessageIndex, setPlayingMessageIndex] = useState<number | null>(null);
   const [isPausedTTS, setIsPausedTTS] = useState(false);
-  const [autoPlayEnabled, setAutoPlayEnabled] = useState(false);
+  const [autoPlayEnabled, setAutoPlayEnabled] = useState(true);
 
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -244,7 +244,6 @@ export default function ChatBox() {
   // TTS functions
   function handlePlayTTS(messageIndex: number, text: string) {
     if (!ttsService.isSupported()) {
-      setError("Text-to-speech is not supported in this browser.");
       return;
     }
 
@@ -271,8 +270,7 @@ export default function ChatBox() {
       onResume: () => {
         setIsPausedTTS(false);
       },
-      onError: (errorMsg) => {
-        setError(errorMsg);
+      onError: () => {
         setPlayingMessageIndex(null);
         setIsPausedTTS(false);
       }

@@ -28,16 +28,13 @@ dotenv.config({ path: path.join(__dirname, ".env") });
 // ==== Env vars ====
 const {
   PORT = "4001",
-  NODE_ENV = "development",
-  FRONTEND_ORIGIN = "http://localhost:5173",
-  
-  // Gmail OAuth2
+  NODE_ENV = process.env.NODE_ENV || "development",
+  FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || "http://localhost:5173",
+
   GMAIL_CLIENT_ID,
   GMAIL_CLIENT_SECRET,
-  GMAIL_REDIRECT_URI = "http://localhost:4001/oauth/gmail/callback",
-  
-  // Session management
-  SESSION_SECRET = "gmail-session-secret",
+  GMAIL_REDIRECT_URI = process.env.GMAIL_REDIRECT_URI || "http://localhost:4001/oauth/gmail/callback",
+
 } = process.env;
 
 if (!GMAIL_CLIENT_ID || !GMAIL_CLIENT_SECRET) {
@@ -126,19 +123,23 @@ app.get("/oauth/gmail/callback", async (req, res) => {
 // ==== Gmail Status ====
 app.get("/gmail-status", async (_req, res) => {
   try {
+    console.log('[Gmail Service] Status check - checking for user1');
     const userId = "user1";
     const tokens = userTokens.get(userId);
     
     if (!tokens) {
+      console.log('[Gmail Service] No tokens found for user1');
       return res.json({ connected: false });
     }
 
+    console.log('[Gmail Service] Tokens found, testing connection...');
     oauth2Client.setCredentials(tokens);
     
     // Test the connection by getting user profile
     const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
     const profile = await gmail.users.getProfile({ userId: 'me' });
     
+    console.log('[Gmail Service] Connection successful:', profile.data.emailAddress);
     res.json({ 
       connected: true, 
       email: profile.data.emailAddress,
@@ -146,7 +147,7 @@ app.get("/gmail-status", async (_req, res) => {
       threadsTotal: profile.data.threadsTotal
     });
   } catch (e) {
-    console.error("Gmail status error:", e);
+    console.error("[Gmail Service] Status error:", e);
     res.json({ connected: false });
   }
 });
@@ -205,15 +206,18 @@ app.post("/gmail/send", async (req, res) => {
 // ==== Get Emails ====
 app.get("/gmail/messages", async (req, res) => {
   try {
+    console.log('[Gmail Service] Get messages request:', { q: req.query.q, maxResults: req.query.maxResults });
     const { q, maxResults = 20, pageToken } = req.query;
     
     const userId = "user1";
     const tokens = userTokens.get(userId);
     
     if (!tokens) {
+      console.log('[Gmail Service] No tokens for get messages');
       return res.status(401).json({ error: "Gmail not connected" });
     }
 
+    console.log('[Gmail Service] Fetching messages from Gmail API...');
     oauth2Client.setCredentials(tokens);
     const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
 

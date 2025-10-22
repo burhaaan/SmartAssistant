@@ -10,7 +10,12 @@
     "start": "NODE_ENV=production node --env-file=.env --enable-source-maps ./dist/index.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": ["gmail", "api", "email", "assistant"],
+  "keywords": [
+    "gmail",
+    "api",
+    "email",
+    "assistant"
+  ],
   "author": "",
   "license": "ISC",
   "dependencies": {
@@ -25,5 +30,9 @@
     "nodemailer": "^6.9.18",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.3"
   }
 }

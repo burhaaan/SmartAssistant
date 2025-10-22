@@ -21,7 +21,7 @@ class TTSService {
   private isPaused = false;
   private callbacks: TTSServiceCallbacks | null = null;
   private settings: VoiceSettings = {
-    rate: 1,
+    rate: 1.3,
     pitch: 1,
     volume: 0.8,
     voice: null
