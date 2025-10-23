@@ -234,7 +234,7 @@ export default function App() {
           </div>
 
           {/* Tab Navigation */}
-          <div style={{ marginBottom: 24, display: "flex", justifyContent: "center" }}>
+          {/* <div style={{ marginBottom: 24, display: "flex", justifyContent: "center" }}>
             <div
               className="glass"
               style={{
@@ -318,7 +318,7 @@ export default function App() {
                 Gmail
               </button>
             </div>
-          </div>
+          </div> */}
 
           <div
             style={{

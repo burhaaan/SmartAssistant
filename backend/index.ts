@@ -416,8 +416,11 @@ app.post("/chat", async (req, res) => {
       system:
         "You are a business assistant. Use QuickBooks MCP tools for accounting tasks. " +
         (gmailConnected 
-          ? "You also have access to Gmail tools to read, search, and send emails. When users ask about emails, use the Gmail tools."
-          : "Gmail is not connected - inform the user they need to connect Gmail to access email features."),
+          ? "You also have access to Gmail tools to read, search, and send emails. When users ask about emails, use the Gmail tools. "
+          : "Gmail is not connected - inform the user they need to connect Gmail to access email features. ") +
+        (twilioClient
+          ? "You also have access to SMS tools to send text messages via Twilio. When users ask to send a text/SMS/message to a phone number, use the send_sms tool."
+          : ""),
 
       messages: [{ role: "user", content: message }],
 
@@ -434,9 +437,12 @@ app.post("/chat", async (req, res) => {
       ],
     };
 
+    // Add tools
+    body.tools = [];
+
     // Add Gmail tools if connected
     if (gmailConnected) {
-      body.tools = [
+      body.tools.push(
         {
           name: "get_latest_emails",
           description: "Get the latest emails from Gmail inbox. Use this when users ask about recent emails, latest messages, or inbox.",
@@ -495,7 +501,29 @@ app.post("/chat", async (req, res) => {
             required: ["to", "subject", "body"]
           }
         }
-      ];
+      );
+    }
+
+    // Add SMS tool if Twilio is configured
+    if (twilioClient) {
+      body.tools.push({
+        name: "send_sms",
+        description: "Send an SMS text message using Twilio. Use this when users ask to send a text message, SMS, or message to a phone number.",
+        input_schema: {
+          type: "object",
+          properties: {
+            to: {
+              type: "string",
+              description: "Recipient phone number (can include country code, e.g., +1234567890 or +4917671066487)"
+            },
+            message: {
+              type: "string",
+              description: "The text message content to send"
+            }
+          },
+          required: ["to", "message"]
+        }
+      });
     }
 
     const anthropicResp = await fetch("https://api.anthropic.com/v1/messages", {
@@ -519,9 +547,9 @@ app.post("/chat", async (req, res) => {
 
     const data = (await anthropicResp.json()) as any;
 
-    // Handle tool use (Gmail tools)
-    console.log('[Chat] Stop reason:', data.stop_reason, 'Gmail connected:', gmailConnected);
-    if (data.stop_reason === "tool_use" && gmailConnected) {
+    // Handle tool use (Gmail and SMS tools)
+    console.log('[Chat] Stop reason:', data.stop_reason);
+    if (data.stop_reason === "tool_use") {
       const toolUse = data.content?.find((c: any) => c.type === "tool_use");
       console.log('[Chat] Tool use found:', toolUse?.name);
       
@@ -560,6 +588,42 @@ app.post("/chat", async (req, res) => {
               );
               console.log('[Chat] Email sent:', sendResult);
               toolResult = { success: true, messageId: sendResult.messageId, threadId: sendResult.threadId };
+              break;
+
+            case "send_sms":
+              console.log('[Chat] Sending SMS...');
+              if (!twilioClient) {
+                toolResult = { error: "SMS service not configured" };
+              } else {
+                const phoneRegex = /^\+?[1-9]\d{1,14}$/;
+                let formattedPhone = toolUse.input.to.replace(/\D/g, '');
+                
+                if (formattedPhone.length === 10) {
+                  formattedPhone = '+1' + formattedPhone;
+                } else if (formattedPhone.length === 11 && formattedPhone.startsWith('1')) {
+                  formattedPhone = '+' + formattedPhone;
+                } else if (!formattedPhone.startsWith('+')) {
+                  formattedPhone = '+' + formattedPhone;
+                }
+
+                if (!phoneRegex.test(formattedPhone)) {
+                  toolResult = { error: "Invalid phone number format" };
+                } else {
+                  const twilioMessage = await twilioClient.messages.create({
+                    body: toolUse.input.message,
+                    from: TWILIO_PHONE_NUMBER,
+                    to: formattedPhone,
+                  });
+                  
+                  console.log('[Chat] SMS sent:', twilioMessage.sid);
+                  toolResult = { 
+                    success: true, 
+                    messageSid: twilioMessage.sid, 
+                    to: formattedPhone, 
+                    status: twilioMessage.status 
+                  };
+                }
+              }
               break;
               
             default:
