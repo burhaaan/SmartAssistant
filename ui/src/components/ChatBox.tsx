@@ -13,7 +13,7 @@ export default function ChatBox() {
   const [messages, setMessages] = useState<Msg[]>([
     {
       role: "assistant",
-      text: "Hi! I'm your AI business partner. I can help with:\n\n📊 QuickBooks data & customer management\n📱 Send SMS messages (just ask me naturally, like \"send a message 'hi' to +1234567890\")\n📧 Send emails (use natural language or `/email recipient@example.com Subject: Your subject | Your message`)\n🔍 Search emails using `/search-email your search query`\n🎯 Business analysis and insights\n\nWhat would you like to do today? 🚀",
+      text: "Hi! I'm your AI business partner. I can help with:\n\n📊 QuickBooks data & customer management\n🔧 Housecall Pro - Field service management (customers, jobs, estimates, employees, appointments, invoices)\n📱 Send SMS messages (just ask me naturally, like \"send a message 'hi' to +1234567890\")\n📧 Send emails (use natural language or `/email recipient@example.com Subject: Your subject | Your message`)\n🔍 Search emails using `/search-email your search query`\n🎯 Business analysis and insights\n\nWhat would you like to do today? 🚀",
     },
   ]);
   const [input, setInput] = useState("");

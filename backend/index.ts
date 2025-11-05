@@ -36,7 +36,7 @@ const {
 
   // Anthropic
   ANTHROPIC_API_KEY,
-  ANTHROPIC_MODEL = "claude-3-5-sonnet-20241022",
+  ANTHROPIC_MODEL = "claude-sonnet-4-5-20250929",
   ANTHROPIC_BETA = "mcp-client-2025-04-04",
 
   // JWT
@@ -53,6 +53,9 @@ const {
 
   // MCP QuickBooks (remote server)
   MCP_QBO_URL,
+
+  // MCP Housecall Pro (remote server)
+  MCP_HP_URL,
 
   // Twilio
   TWILIO_ACCOUNT_SID,
@@ -71,6 +74,9 @@ if (!MCP_QBO_URL) throw new Error("Missing MCP_QBO_URL in env");
 if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_PHONE_NUMBER) {
   console.warn("Warning: Twilio credentials missing. SMS features will be disabled.");
 }
+
+// ==== JWT Audiences ====
+const HCP_MCP_AUD = "housecallpro-mcp";
 
 // ==== Initialize Twilio ====
 const twilioClient = TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN 
@@ -384,12 +390,7 @@ app.post("/chat", async (req, res) => {
       return res.status(400).json({ error: "message is required" });
     }
 
-    const connected = await isQboConnected(1);
-    if (!connected) {
-      return res
-        .status(400)
-        .json({ error: "QuickBooks not connected for userId=1" });
-    }
+    const qboConnected = await isQboConnected(1);
 
     const sessionJwt = jwt.sign(
       { userId: 1, iat: Math.floor(Date.now() / 1000) },
@@ -399,6 +400,18 @@ app.post("/chat", async (req, res) => {
         audience: SESSION_JWT_AUDIENCE,
         issuer: SESSION_JWT_ISSUER,
         expiresIn: Number(SESSION_TTL_SECONDS) || 3600,
+      }
+    );
+
+    // Create short-lived JWT for Housecall Pro MCP (stateless, no DB)
+    const hpAuthJwt = jwt.sign(
+      { userId: 1 },
+      SESSION_JWT_SECRET!,
+      {
+        algorithm: "HS256",
+        audience: HCP_MCP_AUD,
+        issuer: SESSION_JWT_ISSUER,
+        expiresIn: 15 * 60, // 15 minutes
       }
     );
 
@@ -414,7 +427,9 @@ app.post("/chat", async (req, res) => {
 
       // ✅ system belongs here (top-level), not inside messages[]
       system:
-        "You are a business assistant. Use QuickBooks MCP tools for accounting tasks. " +
+        "You are a business assistant. Follow these data source rules strictly: " +
+        "Housecall Pro is the source of truth for customers, jobs, scheduling, invoices, and invoice payments. Always use Housecall Pro tools for these. " +
+        "QuickBooks is the source of truth for financial statements, banking, and supporting accounts (chart of accounts, balances). Use QuickBooks tools for those. " +
         (gmailConnected 
           ? "You also have access to Gmail tools to read, search, and send emails. When users ask about emails, use the Gmail tools. "
           : "Gmail is not connected - inform the user they need to connect Gmail to access email features. ") +
@@ -427,13 +442,20 @@ app.post("/chat", async (req, res) => {
       // ✅ Anthropic MCP URL config
       // Make sure MCP_QBO_URL ends with /sse, e.g. https://smart-assistant-qb-mcp.vercel.app/sse
       mcp_servers: [
-        {
+        // Include QuickBooks MCP only if the user is connected
+        ...(qboConnected ? [{
           type: "url",
           name: "quickbooks",
           url: MCP_QBO_URL!,
-          // this becomes Authorization: Bearer <token> to your MCP server
           authorization_token: sessionJwt,
-        },
+        }] : []),
+        // Include Housecall Pro MCP when configured
+        ...(MCP_HP_URL ? [{
+          type: "url",
+          name: "housecallpro",
+          url: MCP_HP_URL,
+          authorization_token: hpAuthJwt,
+        }] : []),
       ],
     };
 
