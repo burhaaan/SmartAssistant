@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { sendChatMessage, checkQboStatus, disconnectQbo, redirectToQboConnect } from "../services/api";
 import { voiceService } from "../services/voiceService";
@@ -6,12 +6,16 @@ import { ttsService } from "../services/ttsService";
 import { SMSService } from "../services/smsService";
 import { GmailService } from "../services/gmailService";
 import { useAuth } from "../contexts/AuthContext";
+import SMSInterface from "./SMSInterface";
+import GmailInterface from "./GmailInterface";
 
 type Msg = { role: "user" | "assistant" | "system"; text: string };
+type ActiveView = "chat" | "sms" | "gmail";
 
 export default function ChatBox() {
   const navigate = useNavigate();
   const { user, signOut } = useAuth();
+  const [activeView, setActiveView] = useState<ActiveView>("chat");
   const [messages, setMessages] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
   const [qboConnected, setQboConnected] = useState<boolean>(
@@ -26,11 +30,9 @@ export default function ChatBox() {
   // Voice recording states
   const [isRecording, setIsRecording] = useState(false);
   const [interimTranscript, setInterimTranscript] = useState("");
-  const [voiceError, setVoiceError] = useState<string | null>(null);
 
   // Voice output states
   const [playingMessageIndex, setPlayingMessageIndex] = useState<number | null>(null);
-  const [isPausedTTS, setIsPausedTTS] = useState(false);
   const [autoPlayEnabled, setAutoPlayEnabled] = useState(false);
 
   const listRef = useRef<HTMLDivElement>(null);
@@ -139,7 +141,7 @@ export default function ChatBox() {
       } else if (emailMatch) {
         const [, recipient, subject, body] = emailMatch;
         try {
-          const response = await GmailService.sendEmail({
+          await GmailService.sendEmail({
             to: recipient.trim(),
             subject: subject.trim(),
             body: body.trim(),
@@ -192,11 +194,9 @@ export default function ChatBox() {
 
   function handleVoiceToggle() {
     if (!voiceService.isSupported()) {
-      setVoiceError("Speech recognition is not supported in this browser.");
+      setError("Speech recognition is not supported in this browser.");
       return;
     }
-
-    setVoiceError(null);
 
     voiceService.toggleRecording({
       onTranscript: (transcript: string, isFinal: boolean) => {
@@ -208,7 +208,7 @@ export default function ChatBox() {
         }
       },
       onError: (errorMsg: string) => {
-        setVoiceError(errorMsg);
+        setError(errorMsg);
         setIsRecording(false);
         setInterimTranscript("");
       },
@@ -231,22 +231,18 @@ export default function ChatBox() {
     }
 
     setPlayingMessageIndex(messageIndex);
-    setIsPausedTTS(false);
 
     ttsService.speak(text, {
       onStart: () => {
         setPlayingMessageIndex(messageIndex);
-        setIsPausedTTS(false);
       },
       onEnd: () => {
         setPlayingMessageIndex(null);
-        setIsPausedTTS(false);
       },
-      onPause: () => setIsPausedTTS(true),
-      onResume: () => setIsPausedTTS(false),
+      onPause: () => {},
+      onResume: () => {},
       onError: () => {
         setPlayingMessageIndex(null);
-        setIsPausedTTS(false);
       }
     });
   }
@@ -254,12 +250,17 @@ export default function ChatBox() {
   function handleStopTTS() {
     ttsService.stop();
     setPlayingMessageIndex(null);
-    setIsPausedTTS(false);
   }
 
   const handleLogout = async () => {
-    await signOut();
-    navigate("/login");
+    try {
+      await signOut();
+      navigate("/login");
+    } catch (err) {
+      console.error("Logout failed:", err);
+      // Force navigation even if signOut fails
+      navigate("/login");
+    }
   };
 
   return (
@@ -334,6 +335,30 @@ export default function ChatBox() {
             display: none !important;
           }
         }
+        .nav-btn {
+          width: 100%;
+          padding: 12px 16px;
+          border-radius: 8px;
+          border: none;
+          background: transparent;
+          color: rgba(255,255,255,0.7);
+          font-size: 14px;
+          font-weight: 500;
+          cursor: pointer;
+          display: flex;
+          align-items: center;
+          gap: 12px;
+          transition: all 0.2s;
+          text-align: left;
+        }
+        .nav-btn:hover {
+          background: rgba(255,255,255,0.05);
+          color: white;
+        }
+        .nav-btn.active {
+          background: rgba(16, 163, 127, 0.15);
+          color: #10a37f;
+        }
       `}</style>
 
       {/* Sidebar Overlay (mobile) */}
@@ -348,6 +373,7 @@ export default function ChatBox() {
           <button
             onClick={() => {
               setMessages([]);
+              setActiveView("chat");
               setShowSidebar(false);
             }}
             style={{
@@ -371,8 +397,36 @@ export default function ChatBox() {
           </button>
         </div>
 
+        {/* Navigation */}
+        <div style={{ padding: "12px 8px", borderBottom: "1px solid rgba(255,255,255,0.1)" }}>
+          <div style={{ padding: "4px 8px", fontSize: 11, color: "rgba(255,255,255,0.4)", fontWeight: 600, textTransform: "uppercase", marginBottom: 8 }}>
+            Modules
+          </div>
+          <button
+            className={`nav-btn ${activeView === "chat" ? "active" : ""}`}
+            onClick={() => { setActiveView("chat"); setShowSidebar(false); }}
+          >
+            <span style={{ fontSize: 18 }}>🤖</span>
+            AI Chat
+          </button>
+          <button
+            className={`nav-btn ${activeView === "sms" ? "active" : ""}`}
+            onClick={() => { setActiveView("sms"); setShowSidebar(false); }}
+          >
+            <span style={{ fontSize: 18 }}>📱</span>
+            SMS Messages
+          </button>
+          <button
+            className={`nav-btn ${activeView === "gmail" ? "active" : ""}`}
+            onClick={() => { setActiveView("gmail"); setShowSidebar(false); }}
+          >
+            <span style={{ fontSize: 18 }}>📧</span>
+            Gmail
+          </button>
+        </div>
+
         <div style={{ flex: 1, overflow: "auto", padding: 8 }}>
-          <div style={{ padding: "8px 12px", fontSize: 12, color: "rgba(255,255,255,0.4)", fontWeight: 500 }}>
+          <div style={{ padding: "8px 12px", fontSize: 11, color: "rgba(255,255,255,0.4)", fontWeight: 600, textTransform: "uppercase" }}>
             Connections
           </div>
 
@@ -447,7 +501,7 @@ export default function ChatBox() {
           </div>
 
           {/* Settings */}
-          <div style={{ padding: "8px 12px", fontSize: 12, color: "rgba(255,255,255,0.4)", fontWeight: 500, marginTop: 16 }}>
+          <div style={{ padding: "8px 12px", fontSize: 11, color: "rgba(255,255,255,0.4)", fontWeight: 600, textTransform: "uppercase", marginTop: 16 }}>
             Settings
           </div>
 
@@ -547,7 +601,7 @@ export default function ChatBox() {
         </div>
       </aside>
 
-      {/* Main Chat Area */}
+      {/* Main Content Area */}
       <main style={{
         flex: 1,
         display: "flex",
@@ -586,11 +640,11 @@ export default function ChatBox() {
               </svg>
             </button>
             <span style={{ color: "white", fontSize: 16, fontWeight: 500 }}>
-              Business Partner
+              {activeView === "chat" ? "Business Partner" : activeView === "sms" ? "SMS Messages" : "Gmail"}
             </span>
           </div>
 
-          {playingMessageIndex !== null && (
+          {activeView === "chat" && playingMessageIndex !== null && (
             <div style={{
               display: "flex",
               alignItems: "center",
@@ -626,480 +680,533 @@ export default function ChatBox() {
           )}
         </header>
 
-        {/* Messages */}
-        <div
-          ref={listRef}
-          style={{
-            flex: 1,
-            overflowY: "auto",
-            overflowX: "hidden",
-          }}
-        >
-          {messages.length === 0 ? (
-            <div style={{
-              height: "100%",
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "center",
-              justifyContent: "center",
-              padding: 32,
-            }}>
-              <div style={{
-                width: 56,
-                height: 56,
-                borderRadius: 12,
-                background: "#10a37f",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                marginBottom: 24,
-              }}>
-                <span style={{ fontSize: 24 }}>🤖</span>
-              </div>
-              <h2 style={{
-                color: "white",
-                fontSize: 24,
-                fontWeight: 600,
-                margin: "0 0 8px",
-                textAlign: "center",
-              }}>
-                How can I help you today?
-              </h2>
-              <p style={{
-                color: "rgba(255,255,255,0.5)",
-                fontSize: 14,
-                margin: 0,
-                textAlign: "center",
-                maxWidth: 400,
-              }}>
-                I can help with QuickBooks, Housecall Pro, Gmail, and SMS.
-              </p>
-
-              <div style={{
-                display: "grid",
-                gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
-                gap: 12,
-                marginTop: 32,
-                width: "100%",
-                maxWidth: 600,
-              }}>
-                {[
-                  { icon: "📊", text: "Show my profit and loss" },
-                  { icon: "👥", text: "List all customers" },
-                  { icon: "📋", text: "Show unpaid invoices" },
-                  { icon: "💰", text: "What's my account balance?" },
-                ].map((suggestion, i) => (
-                  <button
-                    key={i}
-                    onClick={() => {
-                      setInput(suggestion.text);
-                      inputRef.current?.focus();
-                    }}
-                    style={{
-                      padding: "16px",
-                      borderRadius: 12,
-                      border: "1px solid rgba(255,255,255,0.1)",
-                      background: "rgba(255,255,255,0.03)",
-                      color: "rgba(255,255,255,0.8)",
-                      fontSize: 13,
-                      cursor: "pointer",
-                      textAlign: "left",
-                      transition: "all 0.2s",
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 10,
-                    }}
-                    onMouseEnter={(e) => {
-                      e.currentTarget.style.background = "rgba(255,255,255,0.08)";
-                      e.currentTarget.style.borderColor = "rgba(255,255,255,0.2)";
-                    }}
-                    onMouseLeave={(e) => {
-                      e.currentTarget.style.background = "rgba(255,255,255,0.03)";
-                      e.currentTarget.style.borderColor = "rgba(255,255,255,0.1)";
-                    }}
-                  >
-                    <span style={{ fontSize: 18 }}>{suggestion.icon}</span>
-                    {suggestion.text}
-                  </button>
-                ))}
-              </div>
-            </div>
-          ) : (
-            <div style={{ maxWidth: 768, margin: "0 auto", padding: "24px 16px" }}>
-              {messages.map((m, i) => {
-                const isUser = m.role === "user";
-                const isSystem = m.role === "system";
-                const isPlaying = playingMessageIndex === i;
-                const canPlayTTS = !isUser && !isSystem && ttsService.isSupported();
-
-                return (
-                  <div
-                    key={i}
-                    className="message-enter"
-                    style={{
-                      padding: "24px 0",
-                      borderBottom: i < messages.length - 1 ? "1px solid rgba(255,255,255,0.06)" : "none",
-                    }}
-                  >
-                    <div style={{
-                      display: "flex",
-                      gap: 16,
-                      alignItems: "flex-start",
-                    }}>
-                      {/* Avatar */}
-                      <div style={{
-                        width: 32,
-                        height: 32,
-                        borderRadius: isUser ? "50%" : 8,
-                        background: isUser ? "#5436DA" : isSystem ? "#ef4444" : "#10a37f",
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        flexShrink: 0,
-                      }}>
-                        {isUser ? (
-                          <span style={{ color: "white", fontSize: 12, fontWeight: 600 }}>
-                            {user?.email?.[0]?.toUpperCase() || "U"}
-                          </span>
-                        ) : isSystem ? (
-                          <span style={{ fontSize: 14 }}>⚠️</span>
-                        ) : (
-                          <span style={{ fontSize: 14 }}>🤖</span>
-                        )}
-                      </div>
-
-                      {/* Content */}
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{
-                          fontSize: 13,
-                          fontWeight: 600,
-                          color: "rgba(255,255,255,0.9)",
-                          marginBottom: 6,
-                          display: "flex",
-                          alignItems: "center",
-                          gap: 8,
-                        }}>
-                          {isUser ? "You" : isSystem ? "System" : "Assistant"}
-                          {isPlaying && (
-                            <span style={{
-                              fontSize: 11,
-                              color: "#10a37f",
-                              fontWeight: 500,
-                              display: "flex",
-                              alignItems: "center",
-                              gap: 4,
-                            }}>
-                              <span style={{
-                                width: 4,
-                                height: 4,
-                                borderRadius: "50%",
-                                background: "#10a37f",
-                                animation: "pulse 1s infinite",
-                              }} />
-                              Speaking
-                            </span>
-                          )}
-                        </div>
-                        <div style={{
-                          color: isSystem ? "#fca5a5" : "rgba(255,255,255,0.85)",
-                          fontSize: 15,
-                          lineHeight: 1.7,
-                          whiteSpace: "pre-wrap",
-                          wordBreak: "break-word",
-                        }}>
-                          {m.text}
-                        </div>
-
-                        {/* TTS Button */}
-                        {canPlayTTS && (
-                          <div style={{ marginTop: 12 }}>
-                            {!isPlaying ? (
-                              <button
-                                onClick={() => handlePlayTTS(i, m.text)}
-                                style={{
-                                  padding: "6px 12px",
-                                  borderRadius: 6,
-                                  border: "1px solid rgba(255,255,255,0.1)",
-                                  background: "transparent",
-                                  color: "rgba(255,255,255,0.5)",
-                                  fontSize: 12,
-                                  cursor: "pointer",
-                                  display: "flex",
-                                  alignItems: "center",
-                                  gap: 6,
-                                  transition: "all 0.2s",
-                                }}
-                                onMouseEnter={(e) => {
-                                  e.currentTarget.style.color = "rgba(255,255,255,0.8)";
-                                  e.currentTarget.style.borderColor = "rgba(255,255,255,0.2)";
-                                }}
-                                onMouseLeave={(e) => {
-                                  e.currentTarget.style.color = "rgba(255,255,255,0.5)";
-                                  e.currentTarget.style.borderColor = "rgba(255,255,255,0.1)";
-                                }}
-                              >
-                                <span>🔊</span>
-                                Play
-                              </button>
-                            ) : (
-                              <button
-                                onClick={handleStopTTS}
-                                style={{
-                                  padding: "6px 12px",
-                                  borderRadius: 6,
-                                  border: "1px solid rgba(16, 163, 127, 0.3)",
-                                  background: "rgba(16, 163, 127, 0.1)",
-                                  color: "#10a37f",
-                                  fontSize: 12,
-                                  cursor: "pointer",
-                                  display: "flex",
-                                  alignItems: "center",
-                                  gap: 6,
-                                }}
-                              >
-                                <span>⏹️</span>
-                                Stop
-                              </button>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
-
-              {/* Recording indicator */}
-              {isRecording && (
+        {/* Content based on active view */}
+        {activeView === "chat" ? (
+          <>
+            {/* Messages */}
+            <div
+              ref={listRef}
+              style={{
+                flex: 1,
+                overflowY: "auto",
+                overflowX: "hidden",
+              }}
+            >
+              {messages.length === 0 ? (
                 <div style={{
-                  padding: "16px 0",
+                  height: "100%",
                   display: "flex",
-                  gap: 16,
-                  alignItems: "flex-start",
+                  flexDirection: "column",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  padding: 32,
                 }}>
                   <div style={{
-                    width: 32,
-                    height: 32,
-                    borderRadius: "50%",
-                    background: "#5436DA",
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                  }}>
-                    <span style={{ color: "white", fontSize: 12, fontWeight: 600 }}>
-                      {user?.email?.[0]?.toUpperCase() || "U"}
-                    </span>
-                  </div>
-                  <div style={{
-                    padding: "12px 16px",
-                    borderRadius: 8,
-                    background: "rgba(16, 163, 127, 0.1)",
-                    border: "1px solid rgba(16, 163, 127, 0.3)",
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 8,
-                  }}>
-                    <div style={{
-                      width: 8,
-                      height: 8,
-                      borderRadius: "50%",
-                      background: "#10a37f",
-                      animation: "pulse 1s infinite",
-                    }} />
-                    <span style={{ color: "#10a37f", fontSize: 14 }}>
-                      Listening... {interimTranscript && `"${interimTranscript}"`}
-                    </span>
-                  </div>
-                </div>
-              )}
-
-              {/* Loading indicator */}
-              {loading && (
-                <div style={{
-                  padding: "24px 0",
-                  display: "flex",
-                  gap: 16,
-                  alignItems: "flex-start",
-                }}>
-                  <div style={{
-                    width: 32,
-                    height: 32,
-                    borderRadius: 8,
+                    width: 56,
+                    height: 56,
+                    borderRadius: 12,
                     background: "#10a37f",
                     display: "flex",
                     alignItems: "center",
                     justifyContent: "center",
+                    marginBottom: 24,
                   }}>
-                    <span style={{ fontSize: 14 }}>🤖</span>
+                    <span style={{ fontSize: 24 }}>🤖</span>
                   </div>
-                  <div style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 4,
-                    padding: "8px 0",
+                  <h2 style={{
+                    color: "white",
+                    fontSize: 24,
+                    fontWeight: 600,
+                    margin: "0 0 8px",
+                    textAlign: "center",
                   }}>
-                    {[0, 1, 2].map((i) => (
-                      <div
+                    How can I help you today?
+                  </h2>
+                  <p style={{
+                    color: "rgba(255,255,255,0.5)",
+                    fontSize: 14,
+                    margin: 0,
+                    textAlign: "center",
+                    maxWidth: 500,
+                    lineHeight: 1.6,
+                  }}>
+                    I can help with QuickBooks, Housecall Pro, Gmail, and SMS.
+                  </p>
+
+                  {/* Module Info */}
+                  <div style={{
+                    marginTop: 24,
+                    padding: "16px 24px",
+                    borderRadius: 12,
+                    background: "rgba(255,255,255,0.03)",
+                    border: "1px solid rgba(255,255,255,0.1)",
+                    maxWidth: 500,
+                    width: "100%",
+                  }}>
+                    <div style={{ marginBottom: 12 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                        <span style={{ fontSize: 16 }}>📊</span>
+                        <span style={{ color: "#10a37f", fontSize: 13, fontWeight: 600 }}>QuickBooks</span>
+                      </div>
+                      <p style={{ margin: 0, fontSize: 12, color: "rgba(255,255,255,0.6)", lineHeight: 1.5 }}>
+                        Invoices, Payments, Customers, Vendors, Bills, Reports (P&L, Balance Sheet), Items/Products
+                      </p>
+                    </div>
+                    <div style={{ marginBottom: 12 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                        <span style={{ fontSize: 16 }}>🏠</span>
+                        <span style={{ color: "#f59e0b", fontSize: 13, fontWeight: 600 }}>Housecall Pro</span>
+                      </div>
+                      <p style={{ margin: 0, fontSize: 12, color: "rgba(255,255,255,0.6)", lineHeight: 1.5 }}>
+                        Jobs, Appointments, Estimates, Customers, Employees, Invoices, Scheduling
+                      </p>
+                    </div>
+                    <div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                        <span style={{ fontSize: 16 }}>📧</span>
+                        <span style={{ color: "#ea4335", fontSize: 13, fontWeight: 600 }}>Gmail & SMS</span>
+                      </div>
+                      <p style={{ margin: 0, fontSize: 12, color: "rgba(255,255,255,0.6)", lineHeight: 1.5 }}>
+                        Send/receive emails, search inbox, send SMS messages
+                      </p>
+                    </div>
+                  </div>
+
+                  <div style={{
+                    display: "grid",
+                    gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
+                    gap: 12,
+                    marginTop: 24,
+                    width: "100%",
+                    maxWidth: 600,
+                  }}>
+                    {[
+                      { icon: "📊", text: "Show my profit and loss" },
+                      { icon: "👥", text: "List all customers" },
+                      { icon: "📋", text: "Show unpaid invoices" },
+                      { icon: "💰", text: "What's my account balance?" },
+                    ].map((suggestion, i) => (
+                      <button
                         key={i}
-                        style={{
-                          width: 8,
-                          height: 8,
-                          borderRadius: "50%",
-                          background: "rgba(255,255,255,0.4)",
-                          animation: `bounce 1.4s ${i * 0.16}s infinite ease-in-out both`,
+                        onClick={() => {
+                          setInput(suggestion.text);
+                          inputRef.current?.focus();
                         }}
-                      />
+                        style={{
+                          padding: "16px",
+                          borderRadius: 12,
+                          border: "1px solid rgba(255,255,255,0.1)",
+                          background: "rgba(255,255,255,0.03)",
+                          color: "rgba(255,255,255,0.8)",
+                          fontSize: 13,
+                          cursor: "pointer",
+                          textAlign: "left",
+                          transition: "all 0.2s",
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 10,
+                        }}
+                        onMouseEnter={(e) => {
+                          e.currentTarget.style.background = "rgba(255,255,255,0.08)";
+                          e.currentTarget.style.borderColor = "rgba(255,255,255,0.2)";
+                        }}
+                        onMouseLeave={(e) => {
+                          e.currentTarget.style.background = "rgba(255,255,255,0.03)";
+                          e.currentTarget.style.borderColor = "rgba(255,255,255,0.1)";
+                        }}
+                      >
+                        <span style={{ fontSize: 18 }}>{suggestion.icon}</span>
+                        {suggestion.text}
+                      </button>
                     ))}
                   </div>
                 </div>
+              ) : (
+                <div style={{ maxWidth: 768, margin: "0 auto", padding: "24px 16px" }}>
+                  {messages.map((m, i) => {
+                    const isUser = m.role === "user";
+                    const isSystem = m.role === "system";
+                    const isPlaying = playingMessageIndex === i;
+                    const canPlayTTS = !isUser && !isSystem && ttsService.isSupported();
+
+                    return (
+                      <div
+                        key={i}
+                        className="message-enter"
+                        style={{
+                          padding: "24px 0",
+                          borderBottom: i < messages.length - 1 ? "1px solid rgba(255,255,255,0.06)" : "none",
+                        }}
+                      >
+                        <div style={{
+                          display: "flex",
+                          gap: 16,
+                          alignItems: "flex-start",
+                        }}>
+                          {/* Avatar */}
+                          <div style={{
+                            width: 32,
+                            height: 32,
+                            borderRadius: isUser ? "50%" : 8,
+                            background: isUser ? "#5436DA" : isSystem ? "#ef4444" : "#10a37f",
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            flexShrink: 0,
+                          }}>
+                            {isUser ? (
+                              <span style={{ color: "white", fontSize: 12, fontWeight: 600 }}>
+                                {user?.email?.[0]?.toUpperCase() || "U"}
+                              </span>
+                            ) : isSystem ? (
+                              <span style={{ fontSize: 14 }}>⚠️</span>
+                            ) : (
+                              <span style={{ fontSize: 14 }}>🤖</span>
+                            )}
+                          </div>
+
+                          {/* Content */}
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{
+                              fontSize: 13,
+                              fontWeight: 600,
+                              color: "rgba(255,255,255,0.9)",
+                              marginBottom: 6,
+                              display: "flex",
+                              alignItems: "center",
+                              gap: 8,
+                            }}>
+                              {isUser ? "You" : isSystem ? "System" : "Assistant"}
+                              {isPlaying && (
+                                <span style={{
+                                  fontSize: 11,
+                                  color: "#10a37f",
+                                  fontWeight: 500,
+                                  display: "flex",
+                                  alignItems: "center",
+                                  gap: 4,
+                                }}>
+                                  <span style={{
+                                    width: 4,
+                                    height: 4,
+                                    borderRadius: "50%",
+                                    background: "#10a37f",
+                                    animation: "pulse 1s infinite",
+                                  }} />
+                                  Speaking
+                                </span>
+                              )}
+                            </div>
+                            <div style={{
+                              color: isSystem ? "#fca5a5" : "rgba(255,255,255,0.85)",
+                              fontSize: 15,
+                              lineHeight: 1.7,
+                              whiteSpace: "pre-wrap",
+                              wordBreak: "break-word",
+                            }}>
+                              {m.text}
+                            </div>
+
+                            {/* TTS Button */}
+                            {canPlayTTS && (
+                              <div style={{ marginTop: 12 }}>
+                                {!isPlaying ? (
+                                  <button
+                                    onClick={() => handlePlayTTS(i, m.text)}
+                                    style={{
+                                      padding: "6px 12px",
+                                      borderRadius: 6,
+                                      border: "1px solid rgba(255,255,255,0.1)",
+                                      background: "transparent",
+                                      color: "rgba(255,255,255,0.5)",
+                                      fontSize: 12,
+                                      cursor: "pointer",
+                                      display: "flex",
+                                      alignItems: "center",
+                                      gap: 6,
+                                      transition: "all 0.2s",
+                                    }}
+                                    onMouseEnter={(e) => {
+                                      e.currentTarget.style.color = "rgba(255,255,255,0.8)";
+                                      e.currentTarget.style.borderColor = "rgba(255,255,255,0.2)";
+                                    }}
+                                    onMouseLeave={(e) => {
+                                      e.currentTarget.style.color = "rgba(255,255,255,0.5)";
+                                      e.currentTarget.style.borderColor = "rgba(255,255,255,0.1)";
+                                    }}
+                                  >
+                                    <span>🔊</span>
+                                    Play
+                                  </button>
+                                ) : (
+                                  <button
+                                    onClick={handleStopTTS}
+                                    style={{
+                                      padding: "6px 12px",
+                                      borderRadius: 6,
+                                      border: "1px solid rgba(16, 163, 127, 0.3)",
+                                      background: "rgba(16, 163, 127, 0.1)",
+                                      color: "#10a37f",
+                                      fontSize: 12,
+                                      cursor: "pointer",
+                                      display: "flex",
+                                      alignItems: "center",
+                                      gap: 6,
+                                    }}
+                                  >
+                                    <span>⏹️</span>
+                                    Stop
+                                  </button>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+
+                  {/* Recording indicator */}
+                  {isRecording && (
+                    <div style={{
+                      padding: "16px 0",
+                      display: "flex",
+                      gap: 16,
+                      alignItems: "flex-start",
+                    }}>
+                      <div style={{
+                        width: 32,
+                        height: 32,
+                        borderRadius: "50%",
+                        background: "#5436DA",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                      }}>
+                        <span style={{ color: "white", fontSize: 12, fontWeight: 600 }}>
+                          {user?.email?.[0]?.toUpperCase() || "U"}
+                        </span>
+                      </div>
+                      <div style={{
+                        padding: "12px 16px",
+                        borderRadius: 8,
+                        background: "rgba(16, 163, 127, 0.1)",
+                        border: "1px solid rgba(16, 163, 127, 0.3)",
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 8,
+                      }}>
+                        <div style={{
+                          width: 8,
+                          height: 8,
+                          borderRadius: "50%",
+                          background: "#10a37f",
+                          animation: "pulse 1s infinite",
+                        }} />
+                        <span style={{ color: "#10a37f", fontSize: 14 }}>
+                          Listening... {interimTranscript && `"${interimTranscript}"`}
+                        </span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Loading indicator */}
+                  {loading && (
+                    <div style={{
+                      padding: "24px 0",
+                      display: "flex",
+                      gap: 16,
+                      alignItems: "flex-start",
+                    }}>
+                      <div style={{
+                        width: 32,
+                        height: 32,
+                        borderRadius: 8,
+                        background: "#10a37f",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                      }}>
+                        <span style={{ fontSize: 14 }}>🤖</span>
+                      </div>
+                      <div style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 4,
+                        padding: "8px 0",
+                      }}>
+                        {[0, 1, 2].map((i) => (
+                          <div
+                            key={i}
+                            style={{
+                              width: 8,
+                              height: 8,
+                              borderRadius: "50%",
+                              background: "rgba(255,255,255,0.4)",
+                              animation: `bounce 1.4s ${i * 0.16}s infinite ease-in-out both`,
+                            }}
+                          />
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
               )}
             </div>
-          )}
-        </div>
 
-        {/* Error banner */}
-        {error && (
-          <div style={{
-            margin: "0 16px 16px",
-            padding: "12px 16px",
-            borderRadius: 8,
-            background: "rgba(239, 68, 68, 0.1)",
-            border: "1px solid rgba(239, 68, 68, 0.3)",
-            color: "#fca5a5",
-            fontSize: 13,
-            display: "flex",
-            alignItems: "center",
-            gap: 8,
-          }}>
-            <span>⚠️</span>
-            {error}
-            <button
-              onClick={() => setError(null)}
-              style={{
-                marginLeft: "auto",
-                background: "none",
-                border: "none",
+            {/* Error banner */}
+            {error && (
+              <div style={{
+                margin: "0 16px 16px",
+                padding: "12px 16px",
+                borderRadius: 8,
+                background: "rgba(239, 68, 68, 0.1)",
+                border: "1px solid rgba(239, 68, 68, 0.3)",
                 color: "#fca5a5",
-                cursor: "pointer",
-                fontSize: 16,
-              }}
-            >
-              ×
-            </button>
+                fontSize: 13,
+                display: "flex",
+                alignItems: "center",
+                gap: 8,
+              }}>
+                <span>⚠️</span>
+                {error}
+                <button
+                  onClick={() => setError(null)}
+                  style={{
+                    marginLeft: "auto",
+                    background: "none",
+                    border: "none",
+                    color: "#fca5a5",
+                    cursor: "pointer",
+                    fontSize: 16,
+                  }}
+                >
+                  ×
+                </button>
+              </div>
+            )}
+
+            {/* Input Area */}
+            <div style={{
+              padding: "16px",
+              background: "#212121",
+              borderTop: messages.length > 0 ? "1px solid rgba(255,255,255,0.08)" : "none",
+              flexShrink: 0,
+            }}>
+              <div style={{
+                maxWidth: 768,
+                margin: "0 auto",
+              }}>
+                <div style={{
+                  display: "flex",
+                  alignItems: "flex-end",
+                  gap: 8,
+                  padding: "12px 16px",
+                  borderRadius: 16,
+                  background: "#2f2f2f",
+                  border: "1px solid rgba(255,255,255,0.1)",
+                }}>
+                  {/* Voice button */}
+                  <button
+                    onClick={handleVoiceToggle}
+                    disabled={loading}
+                    style={{
+                      padding: 8,
+                      borderRadius: 8,
+                      border: "none",
+                      background: isRecording ? "rgba(16, 163, 127, 0.2)" : "transparent",
+                      color: isRecording ? "#10a37f" : "rgba(255,255,255,0.5)",
+                      cursor: loading ? "not-allowed" : "pointer",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      transition: "all 0.2s",
+                      flexShrink: 0,
+                    }}
+                    title={isRecording ? "Stop recording" : "Start voice input"}
+                  >
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm-1-9c0-.55.45-1 1-1s1 .45 1 1v6c0 .55-.45 1-1 1s-1-.45-1-1V5zm6 6c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/>
+                    </svg>
+                  </button>
+
+                  {/* Input */}
+                  <textarea
+                    ref={inputRef}
+                    value={input + (interimTranscript ? (input ? " " : "") + interimTranscript : "")}
+                    onChange={(e) => {
+                      if (!isRecording) {
+                        setInput(e.target.value);
+                      }
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !e.shiftKey) {
+                        e.preventDefault();
+                        handleSend();
+                      }
+                    }}
+                    placeholder="Message Business Partner..."
+                    disabled={loading}
+                    rows={1}
+                    style={{
+                      flex: 1,
+                      resize: "none",
+                      border: "none",
+                      background: "transparent",
+                      color: "white",
+                      fontSize: 15,
+                      lineHeight: 1.5,
+                      padding: "4px 0",
+                      maxHeight: 200,
+                      overflow: "auto",
+                    }}
+                  />
+
+                  {/* Send button */}
+                  <button
+                    onClick={handleSend}
+                    disabled={loading || !input.trim()}
+                    style={{
+                      padding: 8,
+                      borderRadius: 8,
+                      border: "none",
+                      background: input.trim() ? "#10a37f" : "rgba(255,255,255,0.1)",
+                      color: input.trim() ? "white" : "rgba(255,255,255,0.3)",
+                      cursor: loading || !input.trim() ? "not-allowed" : "pointer",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      transition: "all 0.2s",
+                      flexShrink: 0,
+                    }}
+                  >
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                      <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+                    </svg>
+                  </button>
+                </div>
+
+                <p style={{
+                  textAlign: "center",
+                  fontSize: 11,
+                  color: "rgba(255,255,255,0.3)",
+                  marginTop: 8,
+                  marginBottom: 0,
+                }}>
+                  Business Partner can make mistakes. Consider checking important information.
+                </p>
+              </div>
+            </div>
+          </>
+        ) : activeView === "sms" ? (
+          <div style={{ flex: 1, overflow: "auto", padding: 16 }}>
+            <SMSInterface />
+          </div>
+        ) : (
+          <div style={{ flex: 1, overflow: "auto", padding: 16 }}>
+            <GmailInterface />
           </div>
         )}
-
-        {/* Input Area */}
-        <div style={{
-          padding: "16px",
-          background: "#212121",
-          borderTop: messages.length > 0 ? "1px solid rgba(255,255,255,0.08)" : "none",
-          flexShrink: 0,
-        }}>
-          <div style={{
-            maxWidth: 768,
-            margin: "0 auto",
-          }}>
-            <div style={{
-              display: "flex",
-              alignItems: "flex-end",
-              gap: 8,
-              padding: "12px 16px",
-              borderRadius: 16,
-              background: "#2f2f2f",
-              border: "1px solid rgba(255,255,255,0.1)",
-            }}>
-              {/* Voice button */}
-              <button
-                onClick={handleVoiceToggle}
-                disabled={loading}
-                style={{
-                  padding: 8,
-                  borderRadius: 8,
-                  border: "none",
-                  background: isRecording ? "rgba(16, 163, 127, 0.2)" : "transparent",
-                  color: isRecording ? "#10a37f" : "rgba(255,255,255,0.5)",
-                  cursor: loading ? "not-allowed" : "pointer",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  transition: "all 0.2s",
-                  flexShrink: 0,
-                }}
-                title={isRecording ? "Stop recording" : "Start voice input"}
-              >
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
-                  <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm-1-9c0-.55.45-1 1-1s1 .45 1 1v6c0 .55-.45 1-1 1s-1-.45-1-1V5zm6 6c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/>
-                </svg>
-              </button>
-
-              {/* Input */}
-              <textarea
-                ref={inputRef}
-                value={input + (interimTranscript ? (input ? " " : "") + interimTranscript : "")}
-                onChange={(e) => {
-                  if (!isRecording) {
-                    setInput(e.target.value);
-                  }
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault();
-                    handleSend();
-                  }
-                }}
-                placeholder="Message Business Partner..."
-                disabled={loading}
-                rows={1}
-                style={{
-                  flex: 1,
-                  resize: "none",
-                  border: "none",
-                  background: "transparent",
-                  color: "white",
-                  fontSize: 15,
-                  lineHeight: 1.5,
-                  padding: "4px 0",
-                  maxHeight: 200,
-                  overflow: "auto",
-                }}
-              />
-
-              {/* Send button */}
-              <button
-                onClick={handleSend}
-                disabled={loading || !input.trim()}
-                style={{
-                  padding: 8,
-                  borderRadius: 8,
-                  border: "none",
-                  background: input.trim() ? "#10a37f" : "rgba(255,255,255,0.1)",
-                  color: input.trim() ? "white" : "rgba(255,255,255,0.3)",
-                  cursor: loading || !input.trim() ? "not-allowed" : "pointer",
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  transition: "all 0.2s",
-                  flexShrink: 0,
-                }}
-              >
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
-                  <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
-                </svg>
-              </button>
-            </div>
-
-            <p style={{
-              textAlign: "center",
-              fontSize: 11,
-              color: "rgba(255,255,255,0.3)",
-              marginTop: 8,
-              marginBottom: 0,
-            }}>
-              Business Partner can make mistakes. Consider checking important information.
-            </p>
-          </div>
-        </div>
       </main>
     </div>
   );

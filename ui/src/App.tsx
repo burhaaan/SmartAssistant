@@ -3,6 +3,7 @@ import { Link, Navigate, Route, Routes, useLocation, useNavigate } from "react-r
 import ChatBox from "./components/ChatBox";
 import PrivacyPolicy from "./pages/PrivacyPolicy";
 import EndUserLicense from "./pages/EndUserLicense";
+import LandingPage from "./pages/LandingPage";
 import AuthPage from "./components/AuthPage";
 import { AuthProvider, useAuth } from "./contexts/AuthContext";
 import "./styles/global.css";
@@ -230,6 +231,7 @@ function AppRoutes() {
 
       <main style={{ flex: 1 }}>
         <Routes>
+          <Route path="/" element={<LandingPage />} />
           <Route path="/login" element={<AuthPage />} />
           <Route path="/privacy" element={<PrivacyPolicy />} />
           <Route path="/eula" element={<EndUserLicense />} />
