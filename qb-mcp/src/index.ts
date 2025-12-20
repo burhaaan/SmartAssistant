@@ -22,6 +22,11 @@ const QB_CLIENT_ID = process.env.QB_CLIENT_ID!;
 const QB_CLIENT_SECRET = process.env.QB_CLIENT_SECRET!;
 const MINOR_VERSION = Number(process.env.QB_MINOR_VERSION || 75);
 
+// Use production API by default, set QB_USE_SANDBOX=true for sandbox
+const QB_API_BASE = process.env.QB_USE_SANDBOX === "true"
+  ? "https://sandbox-quickbooks.api.intuit.com"
+  : "https://quickbooks.api.intuit.com";
+
 // Per-request context
 type Ctx = { userId: number };
 const ctxStore = new AsyncLocalStorage<Ctx>();
@@ -50,6 +55,7 @@ function requireSession(req: express.Request, res: express.Response): Ctx | null
 }
 
 async function refreshWithQbo(refresh_token: string, userId: number, realmId?: string | null) {
+  console.log(`[refreshWithQbo] Attempting token refresh for user ${userId}`);
   const resp = await fetch("https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer", {
     method: "POST",
     headers: {
@@ -60,12 +66,14 @@ async function refreshWithQbo(refresh_token: string, userId: number, realmId?: s
   });
   if (!resp.ok) {
     const t = await resp.text();
+    console.error(`[refreshWithQbo] Refresh failed: ${resp.status} ${t}`);
     throw new Error(`QBO refresh failed: ${resp.status} ${t}`);
   }
   const data = (await resp.json()) as { access_token: string; refresh_token?: string; expires_in?: number };
   const now = Math.floor(Date.now() / 1000);
   const expires_at = data.expires_in ? now + data.expires_in : null;
 
+  console.log(`[refreshWithQbo] Refresh successful, new token expires at ${expires_at}`);
   await upsertTokens({
     userId,
     provider: "quickbooks",
@@ -86,11 +94,12 @@ async function qbRequest(
   const row = await getTokens(ctx.userId, "quickbooks");
   if (!row?.access_token || !row?.realmId) throw new Error("QuickBooks not connected");
 
-  const base = `https://sandbox-quickbooks.api.intuit.com/v3/company/${row.realmId}/${endpoint}`;
+  const base = `${QB_API_BASE}/v3/company/${row.realmId}/${endpoint}`;
   const url =
     base + (base.includes("?") ? `&minorversion=${MINOR_VERSION}` : `?minorversion=${MINOR_VERSION}`);
 
   const doFetch = async (accessToken: string) => {
+    console.log(`[qbRequest] ${opts.method ?? "GET"} ${url}`);
     const resp = await fetch(url, {
       method: opts.method ?? "GET",
       headers: {
@@ -101,8 +110,15 @@ async function qbRequest(
       body: opts.body ? JSON.stringify(opts.body) : undefined,
     });
     const text = await resp.text();
+    console.log(`[qbRequest] Response: ${resp.status} ${text.substring(0, 200)}`);
     if (!resp.ok) {
-      if (resp.status === 401 && row.refresh_token) return { needRefresh: true, text };
+      // QuickBooks returns 401 for expired tokens, but sometimes 400 with error code 3100
+      const isAuthError = resp.status === 401 ||
+        (resp.status === 400 && text.includes("3100"));
+      if (isAuthError && row.refresh_token) {
+        console.log("[qbRequest] Auth error detected, will attempt refresh");
+        return { needRefresh: true, text };
+      }
       throw new Error(`QBO error: ${resp.status} ${text}`);
     }
     return JSON.parse(text || "{}");

@@ -391,6 +391,7 @@ app.post("/chat", async (req, res) => {
     }
 
     const qboConnected = await isQboConnected(1);
+    console.log(`[Chat] QBO connected: ${qboConnected}, MCP_QBO_URL: ${MCP_QBO_URL}`);
 
     const sessionJwt = jwt.sign(
       { userId: 1, iat: Math.floor(Date.now() / 1000) },
@@ -548,6 +549,11 @@ app.post("/chat", async (req, res) => {
       });
     }
 
+    console.log(`[Chat] Sending to Anthropic with ${body.mcp_servers?.length || 0} MCP servers`);
+    if (body.mcp_servers?.length) {
+      console.log(`[Chat] MCP servers: ${body.mcp_servers.map((s: any) => s.name).join(', ')}`);
+    }
+
     const anthropicResp = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
@@ -561,13 +567,14 @@ app.post("/chat", async (req, res) => {
 
     if (!anthropicResp.ok) {
       const errText = await anthropicResp.text();
-      console.error("Anthropic error:", anthropicResp.status, errText);
+      console.error("[Chat] Anthropic error:", anthropicResp.status, errText);
       return res
         .status(502)
         .json({ error: "Anthropic request failed", detail: errText });
     }
 
     const data = (await anthropicResp.json()) as any;
+    console.log(`[Chat] Anthropic response - stop_reason: ${data.stop_reason}, content types: ${data.content?.map((c: any) => c.type).join(', ')}`);
 
     // Handle tool use (Gmail and SMS tools)
     console.log('[Chat] Stop reason:', data.stop_reason);
