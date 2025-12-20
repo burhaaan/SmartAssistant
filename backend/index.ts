@@ -250,25 +250,40 @@ app.use(express.json({ limit: "1mb" }));
 app.get("/health", (_req, res) => res.json({ ok: true, env: NODE_ENV }));
 
 // ==== OAuth: QuickBooks ====
-// In-memory store for OAuth state -> user mapping (should use Redis in production)
-const oauthStateStore = new Map<string, { userId: string; createdAt: number }>();
+// Encode userId in state as JWT (stateless, works with serverless)
+function encodeOAuthState(userId: string): string {
+  return jwt.sign({ userId, nonce: randomUUID() }, SESSION_JWT_SECRET!, {
+    expiresIn: "10m",
+  });
+}
 
-// Clean up old state entries every 5 minutes
-setInterval(() => {
-  const now = Date.now();
-  for (const [key, value] of oauthStateStore.entries()) {
-    if (now - value.createdAt > 10 * 60 * 1000) { // 10 minute expiry
-      oauthStateStore.delete(key);
+function decodeOAuthState(state: string): string | null {
+  try {
+    const decoded = jwt.verify(state, SESSION_JWT_SECRET!) as { userId?: string };
+    return decoded.userId || null;
+  } catch {
+    return null;
+  }
+}
+
+app.get("/connect-qbo", async (req, res) => {
+  // Get userId from auth_token query param (passed from frontend redirect)
+  let userId = "1";
+  const authToken = req.query.auth_token as string | undefined;
+
+  if (authToken && supabaseAdmin) {
+    try {
+      const { data: { user }, error } = await supabaseAdmin.auth.getUser(authToken);
+      if (!error && user) {
+        userId = user.id;
+      }
+    } catch (e) {
+      console.error("Error verifying auth token for OAuth:", e);
     }
   }
-}, 5 * 60 * 1000);
 
-app.get("/connect-qbo", optionalAuth, async (req: AuthenticatedRequest, res) => {
-  const state = randomUUID();
-  const userId = req.user?.id || "1";
-
-  // Store the state -> userId mapping
-  oauthStateStore.set(state, { userId, createdAt: Date.now() });
+  // Encode userId in state (stateless - works with serverless)
+  const state = encodeOAuthState(userId);
 
   const authUrl =
     "https://appcenter.intuit.com/connect/oauth2" +
@@ -288,10 +303,9 @@ app.get("/oauth/qbo/callback", async (req, res) => {
 
     if (!code) return res.redirect(`${FRONTEND_ORIGIN}?qbo=error`);
 
-    // Get userId from state store
-    const stateData = oauthStateStore.get(state);
-    const userId = stateData?.userId || "1";
-    oauthStateStore.delete(state); // Clean up used state
+    // Decode userId from state JWT (stateless)
+    const userId = decodeOAuthState(state) || "1";
+    console.log(`[OAuth Callback] userId from state: ${userId}, realmId: ${realmId}`);
 
     const tokenResp = await fetch(
       "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer",
@@ -348,7 +362,9 @@ app.get("/oauth/qbo/callback", async (req, res) => {
 app.get("/qbo-status", optionalAuth, async (req: AuthenticatedRequest, res) => {
   try {
     const userId = req.user?.id || "1";
+    console.log(`[qbo-status] Checking for userId: ${userId}`);
     const connected = await isQboConnected(userId);
+    console.log(`[qbo-status] userId: ${userId}, connected: ${connected}`);
     res.json({ connected });
   } catch (e) {
     console.error("qbo-status error:", e);
