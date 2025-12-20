@@ -13,7 +13,7 @@ export const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 export type TokenRow = {
   id: number;
-  user_id: number;
+  user_id: string;
   provider: string;
   access_token: string;
   refresh_token: string | null;
@@ -35,7 +35,7 @@ function normalize(row?: TokenRow) {
   };
 }
 
-export async function getTokens(userId: number, provider: string) {
+export async function getTokens(userId: string, provider: string) {
   const { data, error } = await supabase
     .from("tokens")
     .select("*")
@@ -47,7 +47,7 @@ export async function getTokens(userId: number, provider: string) {
 }
 
 export async function upsertTokens(row: {
-  userId: number;
+  userId: string;
   provider: string;
   access_token: string;
   refresh_token?: string | null;
@@ -65,5 +65,14 @@ export async function upsertTokens(row: {
   const { error } = await supabase.from("tokens").upsert(payload, {
     onConflict: "user_id,provider",
   });
+  if (error) throw error;
+}
+
+export async function deleteTokens(userId: string, provider: string) {
+  const { error } = await supabase
+    .from("tokens")
+    .delete()
+    .eq("user_id", userId)
+    .eq("provider", provider);
   if (error) throw error;
 }

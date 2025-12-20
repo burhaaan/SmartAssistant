@@ -13,7 +13,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 dotenv.config();
 
 // Per-request context
-type Ctx = { userId: number };
+type Ctx = { userId: string };
 const ctxStore = new AsyncLocalStorage<Ctx>();
 
 const PORT = Number(process.env.PORT || 3002);
@@ -25,7 +25,7 @@ const HP_API_KEY = process.env.HP_API_KEY!;
 if (!HP_API_KEY) throw new Error("Missing HP_API_KEY");
 
 // Stateless auth: validate short-lived JWT with audience "housecallpro-mcp"
-function requireSession(req: express.Request, res: express.Response): { userId: number } | null {
+function requireSession(req: express.Request, res: express.Response): { userId: string } | null {
   const rawHeader =
     (req.headers["authorization"] as string) ||
     (req.headers["x-session"] as string) ||
@@ -40,10 +40,10 @@ function requireSession(req: express.Request, res: express.Response): { userId: 
     const decoded = jwt.verify(token, SESSION_JWT_SECRET, {
       audience: "housecallpro-mcp",
       issuer: SESSION_JWT_ISSUER,
-    }) as { userId?: number };
+    }) as { userId?: string | number };
 
     if (!decoded?.userId) throw new Error("no userId");
-    return { userId: decoded.userId };
+    return { userId: String(decoded.userId) };
   } catch {
     if (!res.headersSent) {
       res.status(401).json({ error: "invalid_session" });
@@ -306,6 +306,68 @@ function createMcpServer() {
     }
   );
 
+  server.tool(
+    "create_job",
+    "Create a new job for a customer",
+    {
+      customer_id: z.string().min(1).describe("Customer ID"),
+      address_id: z.string().optional().describe("Address ID for the job location"),
+      job_type_id: z.string().optional().describe("Job type ID"),
+      note: z.string().optional().describe("Job notes"),
+      lead_source: z.string().optional().describe("Lead source"),
+      tags: z.array(z.string()).optional().describe("Job tags"),
+      assigned_employee_ids: z.array(z.string()).optional().describe("Employee IDs to assign"),
+    },
+    async (input) => {
+      const data = await hpRequest("/jobs", { method: "POST", body: input });
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "update_job",
+    "Update an existing job",
+    {
+      job_id: z.string().min(1),
+      note: z.string().optional().describe("Job notes"),
+      tags: z.array(z.string()).optional().describe("Job tags"),
+      job_type_id: z.string().optional().describe("Job type ID"),
+    },
+    async (input) => {
+      const { job_id, ...body } = input;
+      const data = await hpRequest(`/jobs/${job_id}`, { method: "PUT", body });
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "update_job_status",
+    "Update the status of a job (e.g., scheduled, in_progress, complete, canceled)",
+    {
+      job_id: z.string().min(1),
+      status: z.enum(["unscheduled", "scheduled", "in_progress", "complete", "canceled"]).describe("New job status"),
+    },
+    async ({ job_id, status }) => {
+      const data = await hpRequest(`/jobs/${job_id}`, { method: "PUT", body: { work_status: status } });
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "cancel_job",
+    "Cancel a job",
+    {
+      job_id: z.string().min(1),
+      cancellation_reason: z.string().optional().describe("Reason for cancellation"),
+    },
+    async ({ job_id, cancellation_reason }) => {
+      const body: any = { work_status: "canceled" };
+      if (cancellation_reason) body.cancellation_reason = cancellation_reason;
+      const data = await hpRequest(`/jobs/${job_id}`, { method: "PUT", body });
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    }
+  );
+
   // -------------------- JOB APPOINTMENTS --------------------
 
   server.tool(
@@ -319,6 +381,72 @@ function createMcpServer() {
     async ({ job_id, page, page_size }) => {
       const data = await hpRequest(`/jobs/${job_id}/appointments`, {
         params: { page, page_size },
+      });
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "create_appointment",
+    "Schedule a new appointment for a job",
+    {
+      job_id: z.string().min(1).describe("Job ID to schedule"),
+      scheduled_start: z.string().describe("Start time in ISO 8601 format (e.g., 2024-01-15T09:00:00Z)"),
+      scheduled_end: z.string().describe("End time in ISO 8601 format"),
+      employee_ids: z.array(z.string()).optional().describe("Employee IDs to assign to this appointment"),
+      arrival_window_minutes: z.number().optional().describe("Arrival window in minutes"),
+      note: z.string().optional().describe("Appointment notes"),
+    },
+    async (input) => {
+      const { job_id, ...body } = input;
+      const data = await hpRequest(`/jobs/${job_id}/appointments`, { method: "POST", body });
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "update_appointment",
+    "Reschedule or update an appointment",
+    {
+      job_id: z.string().min(1),
+      appointment_id: z.string().min(1),
+      scheduled_start: z.string().optional().describe("New start time in ISO 8601 format"),
+      scheduled_end: z.string().optional().describe("New end time in ISO 8601 format"),
+      employee_ids: z.array(z.string()).optional().describe("Employee IDs to assign"),
+      note: z.string().optional().describe("Appointment notes"),
+    },
+    async (input) => {
+      const { job_id, appointment_id, ...body } = input;
+      const data = await hpRequest(`/jobs/${job_id}/appointments/${appointment_id}`, { method: "PUT", body });
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "cancel_appointment",
+    "Cancel an appointment",
+    {
+      job_id: z.string().min(1),
+      appointment_id: z.string().min(1),
+    },
+    async ({ job_id, appointment_id }) => {
+      const data = await hpRequest(`/jobs/${job_id}/appointments/${appointment_id}`, { method: "DELETE" });
+      return { content: [{ type: "text", text: JSON.stringify({ canceled: true, ...data }, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "assign_employee_to_appointment",
+    "Assign a technician/employee to an appointment",
+    {
+      job_id: z.string().min(1),
+      appointment_id: z.string().min(1),
+      employee_ids: z.array(z.string()).min(1).describe("Employee IDs to assign"),
+    },
+    async ({ job_id, appointment_id, employee_ids }) => {
+      const data = await hpRequest(`/jobs/${job_id}/appointments/${appointment_id}`, {
+        method: "PUT",
+        body: { employee_ids },
       });
       return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
     }
@@ -342,6 +470,71 @@ function createMcpServer() {
     }
   );
 
+  server.tool(
+    "get_invoice",
+    "Get a specific invoice by ID",
+    { invoice_id: z.string().min(1) },
+    async ({ invoice_id }) => {
+      const data = await hpRequest(`/invoices/${invoice_id}`);
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "create_invoice",
+    "Create an invoice for a job",
+    {
+      job_id: z.string().min(1).describe("Job ID to invoice"),
+      line_items: z.array(z.object({
+        name: z.string().describe("Item name"),
+        description: z.string().optional(),
+        quantity: z.number().default(1),
+        unit_price: z.number().describe("Price per unit in cents"),
+      })).optional().describe("Line items for the invoice"),
+      note: z.string().optional().describe("Invoice notes"),
+      due_date: z.string().optional().describe("Due date (YYYY-MM-DD)"),
+    },
+    async (input) => {
+      const { job_id, ...body } = input;
+      const data = await hpRequest(`/jobs/${job_id}/invoices`, { method: "POST", body });
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "send_invoice",
+    "Send an invoice to the customer via email",
+    {
+      invoice_id: z.string().min(1),
+      email_to: z.string().email().optional().describe("Override recipient email"),
+      message: z.string().optional().describe("Custom message to include"),
+    },
+    async ({ invoice_id, email_to, message }) => {
+      const body: any = {};
+      if (email_to) body.email = email_to;
+      if (message) body.message = message;
+      const data = await hpRequest(`/invoices/${invoice_id}/send`, { method: "POST", body });
+      return { content: [{ type: "text", text: JSON.stringify({ sent: true, ...data }, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "record_payment",
+    "Record a payment on an invoice",
+    {
+      invoice_id: z.string().min(1),
+      amount: z.number().describe("Payment amount in cents"),
+      payment_method: z.enum(["cash", "check", "credit_card", "other"]).default("other"),
+      note: z.string().optional().describe("Payment note"),
+      paid_at: z.string().optional().describe("Payment date (ISO 8601)"),
+    },
+    async (input) => {
+      const { invoice_id, ...body } = input;
+      const data = await hpRequest(`/invoices/${invoice_id}/payments`, { method: "POST", body });
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    }
+  );
+
   // -------------------- ESTIMATES --------------------
 
   server.tool(
@@ -361,6 +554,68 @@ function createMcpServer() {
     async ({ estimate_id }) => {
       const data = await hpRequest(`/estimates/${estimate_id}`);
       return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "create_estimate",
+    "Create a new estimate for a customer",
+    {
+      customer_id: z.string().min(1).describe("Customer ID"),
+      address_id: z.string().optional().describe("Address ID"),
+      job_type_id: z.string().optional().describe("Job type ID"),
+      note: z.string().optional().describe("Estimate notes"),
+      line_items: z.array(z.object({
+        name: z.string().describe("Item name"),
+        description: z.string().optional(),
+        quantity: z.number().default(1),
+        unit_price: z.number().describe("Price per unit in cents"),
+      })).optional().describe("Line items for the estimate"),
+    },
+    async (input) => {
+      const data = await hpRequest("/estimates", { method: "POST", body: input });
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "update_estimate",
+    "Update an existing estimate",
+    {
+      estimate_id: z.string().min(1),
+      note: z.string().optional().describe("Updated notes"),
+      line_items: z.array(z.object({
+        name: z.string().describe("Item name"),
+        description: z.string().optional(),
+        quantity: z.number().default(1),
+        unit_price: z.number().describe("Price per unit in cents"),
+      })).optional().describe("Updated line items"),
+    },
+    async (input) => {
+      const { estimate_id, ...body } = input;
+      const data = await hpRequest(`/estimates/${estimate_id}`, { method: "PUT", body });
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "convert_estimate_to_job",
+    "Convert an approved estimate to a job",
+    {
+      estimate_id: z.string().min(1).describe("Estimate ID to convert"),
+    },
+    async ({ estimate_id }) => {
+      // First get the estimate details
+      const estimate = await hpRequest(`/estimates/${estimate_id}`);
+      // Create a job from the estimate data
+      const jobData = {
+        customer_id: (estimate as any).customer_id,
+        address_id: (estimate as any).address_id,
+        job_type_id: (estimate as any).job_type_id,
+        note: `Converted from estimate ${estimate_id}. ${(estimate as any).note || ""}`,
+      };
+      const job = await hpRequest("/jobs", { method: "POST", body: jobData });
+      return { content: [{ type: "text", text: JSON.stringify({ converted: true, estimate_id, job }, null, 2) }] };
     }
   );
 

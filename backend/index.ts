@@ -18,8 +18,9 @@ import path from "path";
 import dotenv from "dotenv";
 import { randomUUID } from "crypto";
 import { fetch } from "undici";
-import { getTokens, upsertTokens } from "./src/db.js"; // uses Supabase
+import { getTokens, upsertTokens, deleteTokens } from "./src/db.js"; // uses Supabase
 import twilio from "twilio";
+import { createClient } from "@supabase/supabase-js";
 
 // __dirname for ESM
 const __filename = fileURLToPath(import.meta.url);
@@ -64,6 +65,10 @@ const {
 
   // Gmail Service URL
   GMAIL_SERVICE_URL = process.env.GMAIL_SERVICE_URL || "http://localhost:4001",
+
+  // Supabase Auth
+  SUPABASE_URL,
+  SUPABASE_SERVICE_ROLE_KEY,
 } = process.env;
 
 if (!ANTHROPIC_API_KEY) throw new Error("Missing ANTHROPIC_API_KEY in env");
@@ -73,6 +78,78 @@ if (!QB_CLIENT_ID || !QB_CLIENT_SECRET)
 if (!MCP_QBO_URL) throw new Error("Missing MCP_QBO_URL in env");
 if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !TWILIO_PHONE_NUMBER) {
   console.warn("Warning: Twilio credentials missing. SMS features will be disabled.");
+}
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+  console.warn("Warning: Supabase credentials missing. Auth will be disabled.");
+}
+
+// ==== Supabase Admin Client (for verifying auth tokens) ====
+const supabaseAdmin = SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY
+  ? createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+      auth: { autoRefreshToken: false, persistSession: false }
+    })
+  : null;
+
+// ==== Auth Middleware ====
+interface AuthenticatedRequest extends express.Request {
+  user?: { id: string; email?: string };
+}
+
+async function requireAuth(
+  req: AuthenticatedRequest,
+  res: express.Response,
+  next: express.NextFunction
+) {
+  // If Supabase is not configured, allow requests through with placeholder user
+  if (!supabaseAdmin) {
+    req.user = { id: "1", email: "dev@localhost" };
+    return next();
+  }
+
+  const authHeader = req.headers.authorization;
+  if (!authHeader?.startsWith("Bearer ")) {
+    return res.status(401).json({ error: "Missing or invalid authorization header" });
+  }
+
+  const token = authHeader.slice(7);
+  try {
+    const { data: { user }, error } = await supabaseAdmin.auth.getUser(token);
+    if (error || !user) {
+      return res.status(401).json({ error: "Invalid or expired token" });
+    }
+    req.user = { id: user.id, email: user.email };
+    next();
+  } catch (err) {
+    console.error("Auth error:", err);
+    return res.status(401).json({ error: "Authentication failed" });
+  }
+}
+
+// Optional auth - populates user if token present, but doesn't require it
+async function optionalAuth(
+  req: AuthenticatedRequest,
+  res: express.Response,
+  next: express.NextFunction
+) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader?.startsWith("Bearer ") || !supabaseAdmin) {
+    // No token or no Supabase - use default user for backward compatibility
+    req.user = { id: "1", email: "dev@localhost" };
+    return next();
+  }
+
+  const token = authHeader.slice(7);
+  try {
+    const { data: { user }, error } = await supabaseAdmin.auth.getUser(token);
+    if (!error && user) {
+      req.user = { id: user.id, email: user.email };
+    } else {
+      req.user = { id: "1", email: "dev@localhost" };
+    }
+  } catch {
+    req.user = { id: "1", email: "dev@localhost" };
+  }
+  next();
 }
 
 // ==== JWT Audiences ====
@@ -84,7 +161,7 @@ const twilioClient = TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN
   : null;
 
 // ==== Helpers (Supabase-backed) ====
-async function isQboConnected(userId: number) {
+async function isQboConnected(userId: string) {
   const row = await getTokens(userId, "quickbooks");
   if (!row?.access_token) return false;
   if (row.expires_at && Number(row.expires_at) <= Math.floor(Date.now() / 1000))
@@ -173,8 +250,26 @@ app.use(express.json({ limit: "1mb" }));
 app.get("/health", (_req, res) => res.json({ ok: true, env: NODE_ENV }));
 
 // ==== OAuth: QuickBooks ====
-app.get("/connect-qbo", async (_req, res) => {
+// In-memory store for OAuth state -> user mapping (should use Redis in production)
+const oauthStateStore = new Map<string, { userId: string; createdAt: number }>();
+
+// Clean up old state entries every 5 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, value] of oauthStateStore.entries()) {
+    if (now - value.createdAt > 10 * 60 * 1000) { // 10 minute expiry
+      oauthStateStore.delete(key);
+    }
+  }
+}, 5 * 60 * 1000);
+
+app.get("/connect-qbo", optionalAuth, async (req: AuthenticatedRequest, res) => {
   const state = randomUUID();
+  const userId = req.user?.id || "1";
+
+  // Store the state -> userId mapping
+  oauthStateStore.set(state, { userId, createdAt: Date.now() });
+
   const authUrl =
     "https://appcenter.intuit.com/connect/oauth2" +
     `?client_id=${encodeURIComponent(QB_CLIENT_ID!)}` +
@@ -188,9 +283,15 @@ app.get("/connect-qbo", async (_req, res) => {
 app.get("/oauth/qbo/callback", async (req, res) => {
   try {
     const code = String(req.query.code || "");
+    const state = String(req.query.state || "");
     const realmId = req.query.realmId ? String(req.query.realmId) : undefined;
 
     if (!code) return res.redirect(`${FRONTEND_ORIGIN}?qbo=error`);
+
+    // Get userId from state store
+    const stateData = oauthStateStore.get(state);
+    const userId = stateData?.userId || "1";
+    oauthStateStore.delete(state); // Clean up used state
 
     const tokenResp = await fetch(
       "https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer",
@@ -228,7 +329,7 @@ app.get("/oauth/qbo/callback", async (req, res) => {
 
     // Persist to Supabase
     await upsertTokens({
-      userId: 1,
+      userId,
       provider: "quickbooks",
       access_token: data.access_token,
       refresh_token: data.refresh_token ?? null,
@@ -244,13 +345,51 @@ app.get("/oauth/qbo/callback", async (req, res) => {
 });
 
 // ==== QBO Status ====
-app.get("/qbo-status", async (_req, res) => {
+app.get("/qbo-status", optionalAuth, async (req: AuthenticatedRequest, res) => {
   try {
-    const connected = await isQboConnected(1);
+    const userId = req.user?.id || "1";
+    const connected = await isQboConnected(userId);
     res.json({ connected });
   } catch (e) {
     console.error("qbo-status error:", e);
     res.status(500).json({ connected: false });
+  }
+});
+
+// ==== Disconnect Endpoints ====
+app.post("/disconnect-qbo", optionalAuth, async (req: AuthenticatedRequest, res) => {
+  try {
+    const userId = req.user?.id || "1";
+
+    // Get current tokens to revoke at Intuit
+    const tokens = await getTokens(userId, "quickbooks");
+
+    // Optionally revoke at Intuit (best practice)
+    if (tokens?.refresh_token) {
+      try {
+        await fetch("https://developer.api.intuit.com/v2/oauth2/tokens/revoke", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+            Authorization: `Basic ${Buffer.from(`${QB_CLIENT_ID}:${QB_CLIENT_SECRET}`).toString("base64")}`,
+          },
+          body: `token=${tokens.refresh_token}`,
+        });
+        console.log("[Disconnect QBO] Token revoked at Intuit");
+      } catch (revokeErr) {
+        console.warn("[Disconnect QBO] Failed to revoke at Intuit:", revokeErr);
+        // Continue to delete from DB even if revoke fails
+      }
+    }
+
+    // Delete from database
+    await deleteTokens(userId, "quickbooks");
+    console.log("[Disconnect QBO] Tokens deleted from database");
+
+    res.json({ success: true });
+  } catch (e: any) {
+    console.error("disconnect-qbo error:", e);
+    res.status(500).json({ error: e?.message || "disconnect_error" });
   }
 });
 
@@ -383,18 +522,19 @@ app.get("/sms/history", async (req, res) => {
 });
 
 // ==== Chat proxy: Anthropic ====
-app.post("/chat", async (req, res) => {
+app.post("/chat", optionalAuth, async (req: AuthenticatedRequest, res) => {
   try {
     const { message } = req.body as { message?: string };
     if (!message || typeof message !== "string") {
       return res.status(400).json({ error: "message is required" });
     }
 
-    const qboConnected = await isQboConnected(1);
+    const userId = req.user?.id || "1";
+    const qboConnected = await isQboConnected(userId);
     console.log(`[Chat] QBO connected: ${qboConnected}, MCP_QBO_URL: ${MCP_QBO_URL}`);
 
     const sessionJwt = jwt.sign(
-      { userId: 1, iat: Math.floor(Date.now() / 1000) },
+      { userId, iat: Math.floor(Date.now() / 1000) },
       SESSION_JWT_SECRET!,
       {
         algorithm: "HS256",
@@ -406,7 +546,7 @@ app.post("/chat", async (req, res) => {
 
     // Create short-lived JWT for Housecall Pro MCP (stateless, no DB)
     const hpAuthJwt = jwt.sign(
-      { userId: 1 },
+      { userId },
       SESSION_JWT_SECRET!,
       {
         algorithm: "HS256",
@@ -720,16 +860,6 @@ app.post("/chat", async (req, res) => {
   } catch (err: any) {
     console.error("Chat error:", err);
     return res.status(500).json({ error: "internal_error" });
-  }
-});
-
-// ⚠️ Debug only (remove in prod)
-app.get("/debug/qbo-tokens", async (_req, res) => {
-  try {
-    const row = await getTokens(1, "quickbooks");
-    res.json(row || {});
-  } catch (e: any) {
-    res.status(500).json({ error: e?.message || "debug_error" });
   }
 });
 

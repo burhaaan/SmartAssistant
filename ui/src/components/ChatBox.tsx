@@ -1,6 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { sendChatMessage, checkQboStatus } from "../services/api";
-import { redirectToQboConnect } from "../services/api";
+import { sendChatMessage, checkQboStatus, disconnectQbo, redirectToQboConnect } from "../services/api";
 import { voiceService } from "../services/voiceService";
 import { ttsService } from "../services/ttsService";
 import { SMSService } from "../services/smsService";
@@ -13,7 +12,7 @@ export default function ChatBox() {
   const [messages, setMessages] = useState<Msg[]>([
     {
       role: "assistant",
-      text: "Hi! I'm your AI business partner. I can help with:\n\n📊 QuickBooks data & customer management\n🔧 Housecall Pro - Field service management (customers, jobs, estimates, employees, appointments, invoices)\n📱 Send SMS messages (just ask me naturally, like \"send a message 'hi' to +1234567890\")\n📧 Send emails (use natural language or `/email recipient@example.com Subject: Your subject | Your message`)\n🔍 Search emails using `/search-email your search query`\n🎯 Business analysis and insights\n\nWhat would you like to do today? 🚀",
+      text: "Hi! I'm your AI business partner. I can help with:\n\n🔧 **Housecall Pro** - Customers, jobs, scheduling, estimates, employees, appointments, invoices & payments\n📊 **QuickBooks** - Financial statements, banking, chart of accounts & balances\n📧 **Gmail** - Read, search, and send emails\n📱 **SMS** - Send text messages (e.g., \"send 'hello' to +1234567890\")\n\nWhat would you like to do today?",
     },
   ]);
   const [input, setInput] = useState("");
@@ -22,6 +21,7 @@ export default function ChatBox() {
   );
   const [loading, setLoading] = useState(false);
   const [redirecting, setRedirecting] = useState(false);
+  const [disconnecting, setDisconnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   
   // Voice recording states
@@ -197,10 +197,6 @@ export default function ChatBox() {
     redirectToQboConnect();
   }
 
-  function handleQuickInsert(text: string) {
-    setInput(text);
-  }
-
   // Voice recording functions
   function handleVoiceToggle() {
     if (!voiceService.isSupported()) {
@@ -295,82 +291,56 @@ export default function ChatBox() {
     setIsPausedTTS(false);
   }
 
-  const pill = (text: string, onClick: () => void, icon?: string) => (
-    <button
-      onClick={onClick}
-      className="glass"
-      style={{
-        padding: "10px 16px",
-        borderRadius: "20px",
-        color: "white",
-        fontSize: 13,
-        fontWeight: 500,
-        border: "1px solid rgba(255,255,255,0.15)",
-        background: "linear-gradient(135deg, rgba(255,255,255,0.1), rgba(255,255,255,0.05))",
-        cursor: "pointer",
-        transition: "all 0.2s cubic-bezier(0.4, 0, 0.2, 1)",
-        display: "flex",
-        alignItems: "center",
-        gap: 8,
-      }}
-      onMouseEnter={(e) => {
-        e.currentTarget.style.transform = "translateY(-1px)";
-        e.currentTarget.style.background = "linear-gradient(135deg, rgba(255,255,255,0.15), rgba(255,255,255,0.08))";
-      }}
-      onMouseLeave={(e) => {
-        e.currentTarget.style.transform = "translateY(0)";
-        e.currentTarget.style.background = "linear-gradient(135deg, rgba(255,255,255,0.1), rgba(255,255,255,0.05))";
-      }}
-    >
-      {icon && <span style={{ fontSize: 14 }}>{icon}</span>}
-      {text}
-    </button>
-  );
-
   return (
     <div
-      className="glass"
+      className="glass chatbox-container"
       style={{
         borderRadius: 24,
-        padding: 24,
+        padding: "clamp(12px, 4vw, 24px)",
         color: "white",
         background: "rgba(255, 255, 255, 0.03)",
         border: "1px solid rgba(255, 255, 255, 0.08)",
         boxShadow: "0 20px 40px rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.05)",
+        maxWidth: "100%",
+        width: "100%",
+        boxSizing: "border-box",
       }}
     >
       {/* Enhanced header row */}
       <div
+        className="chatbox-header"
         style={{
           display: "flex",
           alignItems: "center",
-          gap: 16,
-          marginBottom: 20,
+          gap: "clamp(8px, 2vw, 16px)",
+          marginBottom: "clamp(12px, 3vw, 20px)",
           justifyContent: "space-between",
-          paddingBottom: 16,
+          paddingBottom: "clamp(12px, 2vw, 16px)",
           borderBottom: "1px solid rgba(255, 255, 255, 0.08)",
+          flexWrap: "wrap",
         }}
       >
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "clamp(8px, 2vw, 12px)" }}>
           <div
             style={{
-              width: 44,
-              height: 44,
-              borderRadius: "16px",
+              width: "clamp(36px, 8vw, 44px)",
+              height: "clamp(36px, 8vw, 44px)",
+              borderRadius: "clamp(12px, 3vw, 16px)",
               background: "linear-gradient(135deg, #8b5cf6 0%, #ec4899 100%)",
               display: "flex",
               alignItems: "center",
               justifyContent: "center",
-              fontSize: 18,
+              fontSize: "clamp(14px, 3vw, 18px)",
               boxShadow: "0 8px 20px rgba(139, 92, 246, 0.3)",
+              flexShrink: 0,
             }}
           >
             🤖
           </div>
           <div>
-            <div style={{ 
-              fontWeight: 700, 
-              fontSize: 16,
+            <div style={{
+              fontWeight: 700,
+              fontSize: "clamp(14px, 3vw, 16px)",
               letterSpacing: "-0.01em",
               background: "linear-gradient(135deg, #ffffff 0%, #e879f9 100%)",
               WebkitBackgroundClip: "text",
@@ -379,18 +349,21 @@ export default function ChatBox() {
             }}>
               Claude Assistant
             </div>
-            <div style={{ 
-              fontSize: 13, 
+            <div style={{
+              fontSize: "clamp(11px, 2.5vw, 13px)",
               color: "rgba(255, 255, 255, 0.6)",
               fontWeight: 400,
               marginTop: 2,
-            }}>
+              display: "none",
+            }}
+            className="subtitle-desktop"
+            >
               Your AI Business Partner
             </div>
           </div>
         </div>
 
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "clamp(6px, 2vw, 12px)", flexWrap: "wrap" }}>
           {/* Global TTS Controls */}
           {playingMessageIndex !== null && (
             <div style={{
@@ -492,25 +465,40 @@ export default function ChatBox() {
 
           {qboConnected ? (
             <button
-              onClick={() => {
-                localStorage.removeItem("qboConnected");
-                setQboConnected(false);
+              onClick={async () => {
+                setDisconnecting(true);
+                setError(null);
+                try {
+                  await disconnectQbo();
+                  localStorage.removeItem("qboConnected");
+                  setQboConnected(false);
+                  setMessages((m) => [...m, {
+                    role: "system",
+                    text: "QuickBooks has been disconnected successfully."
+                  }]);
+                } catch (err: any) {
+                  setError(err?.message || "Failed to disconnect QuickBooks");
+                } finally {
+                  setDisconnecting(false);
+                }
               }}
+              disabled={disconnecting}
               className="glass"
               style={{
                 padding: "8px 12px",
                 borderRadius: "10px",
                 fontSize: 12,
                 fontWeight: 500,
-                border: "1px solid rgba(255,255,255,0.15)",
-                background: "linear-gradient(135deg, rgba(255,255,255,0.08), rgba(255,255,255,0.02))",
-                color: "rgba(255, 255, 255, 0.8)",
-                cursor: "pointer",
+                border: "1px solid rgba(239, 68, 68, 0.3)",
+                background: "linear-gradient(135deg, rgba(239, 68, 68, 0.15), rgba(239, 68, 68, 0.05))",
+                color: disconnecting ? "rgba(255, 255, 255, 0.5)" : "#ef4444",
+                cursor: disconnecting ? "not-allowed" : "pointer",
                 transition: "all 0.2s ease",
+                opacity: disconnecting ? 0.7 : 1,
               }}
-              title="Dev: clear local flag"
+              title="Disconnect QuickBooks"
             >
-              Clear flag
+              {disconnecting ? "Disconnecting..." : "Disconnect"}
             </button>
           ) : (
             <button
@@ -582,11 +570,11 @@ export default function ChatBox() {
       {/* Enhanced chat area */}
       <div
         ref={listRef}
-        className="glass"
+        className="glass chat-messages"
         style={{
-          height: 450,
-          borderRadius: "18px",
-          padding: 20,
+          height: "clamp(300px, 50vh, 450px)",
+          borderRadius: "clamp(12px, 3vw, 18px)",
+          padding: "clamp(12px, 3vw, 20px)",
           overflowY: "auto",
           background: "rgba(0, 0, 0, 0.3)",
           border: "1px solid rgba(255, 255, 255, 0.1)",
@@ -915,41 +903,18 @@ export default function ChatBox() {
         </div>
       )}
 
-      {/* Quick Actions */}
-      <div style={{ 
-        display: "flex", 
-        gap: 12, 
-        flexWrap: "wrap", 
-        marginTop: 16,
-        alignItems: "center",
-      }}>
-        <div style={{ 
-          fontSize: 12, 
-          color: "rgba(255, 255, 255, 0.6)", 
-          fontWeight: 500,
-          marginRight: 8,
-        }}>
-          Quick Actions:
-        </div>
-        {pill("📊 Show customers", () => handleQuickInsert("Show me all customers"))}
-        {pill("📱 SMS command", () => handleQuickInsert("/sms +1 Hello! This is a test message"), "💬")}
-        {pill("📧 Email command", () => handleQuickInsert("/email recipient@example.com Subject: Hello | Your message here"), "✉️")}
-        {pill("🔍 Search emails", () => handleQuickInsert("/search-email unread"), "🔎")}
-        {pill("💰 Recent invoices", () => handleQuickInsert("Show me recent invoices"))}
-        {pill("📈 Sales summary", () => handleQuickInsert("Give me a sales summary for this month"))}
-      </div>
-
       {/* Enhanced input row */}
       <div
+        className="input-row"
         style={{
-          marginTop: 20,
-          display: "grid",
-          gridTemplateColumns: "1fr auto auto auto",
-          gap: 12,
-          alignItems: "end",
+          marginTop: "clamp(12px, 3vw, 20px)",
+          display: "flex",
+          flexWrap: "wrap",
+          gap: "clamp(8px, 2vw, 12px)",
+          alignItems: "center",
         }}
       >
-        <div style={{ position: "relative" }}>
+        <div style={{ position: "relative", flex: "1 1 200px", minWidth: 0 }}>
           <input
             value={input + (interimTranscript ? (input ? " " : "") + interimTranscript : "")}
             onChange={(e) => {
@@ -959,44 +924,28 @@ export default function ChatBox() {
               }
             }}
             onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && handleSend()}
-            placeholder={isRecording ? "Listening..." : "Ask me anything about your business..."}
+            placeholder={isRecording ? "Listening..." : "Ask me anything..."}
             disabled={loading}
             className="glass"
             style={{
               width: "100%",
-              padding: "16px 20px",
-              paddingRight: "50px", // Make room for voice button
-              borderRadius: "16px",
+              padding: "clamp(12px, 3vw, 16px) clamp(14px, 3vw, 20px)",
+              borderRadius: "clamp(12px, 3vw, 16px)",
               border: `1px solid ${isRecording ? "rgba(34, 197, 94, 0.4)" : "rgba(255, 255, 255, 0.15)"}`,
-              background: isRecording 
-                ? "rgba(34, 197, 94, 0.1)" 
+              background: isRecording
+                ? "rgba(34, 197, 94, 0.1)"
                 : "rgba(0, 0, 0, 0.3)",
               color: "white",
-              fontSize: 14,
+              fontSize: "clamp(13px, 3vw, 14px)",
               outline: "none",
               transition: "all 0.2s ease",
               backdropFilter: "blur(10px)",
-              boxShadow: isRecording 
-                ? "0 0 20px rgba(34, 197, 94, 0.3)" 
+              boxShadow: isRecording
+                ? "0 0 20px rgba(34, 197, 94, 0.3)"
                 : "none",
+              boxSizing: "border-box",
             }}
           />
-          
-          {/* Interim transcript styling */}
-          {interimTranscript && (
-            <div style={{
-              position: "absolute",
-              right: "60px",
-              top: "50%",
-              transform: "translateY(-50%)",
-              color: "rgba(255, 255, 255, 0.6)",
-              fontSize: 12,
-              pointerEvents: "none",
-              fontStyle: "italic",
-            }}>
-              {interimTranscript}
-            </div>
-          )}
         </div>
         
         {/* Voice button */}
@@ -1005,77 +954,99 @@ export default function ChatBox() {
           disabled={loading}
           className="glass"
           style={{
-            padding: "14px 16px",
-            borderRadius: "14px",
+            padding: "clamp(10px, 2.5vw, 14px) clamp(12px, 3vw, 16px)",
+            borderRadius: "clamp(10px, 2.5vw, 14px)",
             border: `1px solid ${isRecording ? "rgba(34, 197, 94, 0.4)" : "rgba(255, 255, 255, 0.15)"}`,
-            background: isRecording 
+            background: isRecording
               ? "linear-gradient(135deg, rgba(34, 197, 94, 0.2), rgba(34, 197, 94, 0.1))"
               : "linear-gradient(135deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.05))",
             color: isRecording ? "#22c55e" : "rgba(255, 255, 255, 0.8)",
             cursor: loading ? "not-allowed" : "pointer",
-            fontSize: 16,
+            fontSize: "clamp(14px, 3vw, 16px)",
             transition: "all 0.2s ease",
             opacity: loading ? 0.5 : 1,
             animation: isRecording ? "pulseSlow 1.5s infinite" : "none",
             boxShadow: isRecording ? "0 0 20px rgba(34, 197, 94, 0.4)" : "none",
+            flexShrink: 0,
           }}
           title={isRecording ? "Stop recording" : "Start voice input"}
         >
           🎤
         </button>
-        
+
         <button
           onClick={() => {
-            setMessages([{ 
-              role: "assistant", 
-              text: "Chat cleared! I'm ready to help you with your business questions. What would you like to know? 🎯" 
+            setMessages([{
+              role: "assistant",
+              text: "Chat cleared! I'm ready to help you with your business questions. What would you like to know?",
             }]);
             setError(null);
           }}
           disabled={loading}
           className="glass"
           style={{
-            padding: "14px 16px",
-            borderRadius: "14px",
+            padding: "clamp(10px, 2.5vw, 14px) clamp(12px, 3vw, 16px)",
+            borderRadius: "clamp(10px, 2.5vw, 14px)",
             border: "1px solid rgba(255, 255, 255, 0.15)",
             background: "linear-gradient(135deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.05))",
             color: "rgba(255, 255, 255, 0.8)",
             cursor: "pointer",
-            fontSize: 16,
+            fontSize: "clamp(14px, 3vw, 16px)",
             transition: "all 0.2s ease",
             opacity: loading ? 0.5 : 1,
+            flexShrink: 0,
           }}
           title="Clear chat"
         >
           🧹
         </button>
-        
+
         <button
           onClick={handleSend}
           disabled={loading || !input.trim()}
           style={{
-            padding: "14px 20px",
-            borderRadius: "14px",
+            padding: "clamp(10px, 2.5vw, 14px) clamp(14px, 3vw, 20px)",
+            borderRadius: "clamp(10px, 2.5vw, 14px)",
             border: "none",
             color: "white",
-            fontSize: 14,
+            fontSize: "clamp(12px, 3vw, 14px)",
             fontWeight: 600,
-            background: loading || !input.trim() 
-              ? "rgba(139, 92, 246, 0.4)" 
+            background: loading || !input.trim()
+              ? "rgba(139, 92, 246, 0.4)"
               : "linear-gradient(135deg, #8b5cf6 0%, #ec4899 100%)",
-            boxShadow: loading || !input.trim() 
-              ? "none" 
+            boxShadow: loading || !input.trim()
+              ? "none"
               : "0 8px 20px rgba(139, 92, 246, 0.4)",
             cursor: loading || !input.trim() ? "not-allowed" : "pointer",
             opacity: loading || !input.trim() ? 0.6 : 1,
             transition: "all 0.2s ease",
             transform: loading ? "scale(0.98)" : "scale(1)",
+            flexShrink: 0,
           }}
           title="Send message"
         >
-          {loading ? "Sending..." : "Send"}
+          {loading ? "..." : "Send"}
         </button>
       </div>
+
+      {/* Mobile responsive styles */}
+      <style>{`
+        @media (min-width: 640px) {
+          .subtitle-desktop {
+            display: block !important;
+          }
+        }
+
+        @media (max-width: 480px) {
+          .chatbox-header {
+            gap: 8px !important;
+          }
+          .chat-messages {
+            height: calc(100vh - 280px) !important;
+            min-height: 250px;
+          }
+        }
+      `}</style>
     </div>
   );
 }

@@ -28,7 +28,7 @@ const QB_API_BASE = process.env.QB_USE_SANDBOX === "true"
   : "https://quickbooks.api.intuit.com";
 
 // Per-request context
-type Ctx = { userId: number };
+type Ctx = { userId: string };
 const ctxStore = new AsyncLocalStorage<Ctx>();
 
 function requireSession(req: express.Request, res: express.Response): Ctx | null {
@@ -43,9 +43,10 @@ function requireSession(req: express.Request, res: express.Response): Ctx | null
     : raw;
 
   try {
-    const decoded = jwt.verify(token, SESSION_JWT_SECRET) as { userId?: number };
+    const decoded = jwt.verify(token, SESSION_JWT_SECRET) as { userId?: string | number };
     if (!decoded?.userId) throw new Error("no userId");
-    return { userId: decoded.userId };
+    // Convert to string to support both legacy number IDs and new UUID IDs
+    return { userId: String(decoded.userId) };
   } catch {
     if (!res.headersSent) {
       res.status(401).json({ error: "invalid_session" });
@@ -54,7 +55,7 @@ function requireSession(req: express.Request, res: express.Response): Ctx | null
   }
 }
 
-async function refreshWithQbo(refresh_token: string, userId: number, realmId?: string | null) {
+async function refreshWithQbo(refresh_token: string, userId: string, realmId?: string | null) {
   console.log(`[refreshWithQbo] Attempting token refresh for user ${userId}`);
   const resp = await fetch("https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer", {
     method: "POST",
@@ -539,6 +540,825 @@ function createMcpServer() {
       const accounts = data?.QueryResponse?.Account ?? [];
       const hit = accounts[0] ?? null;
       return { content: [{ type: "text", text: JSON.stringify(hit, null, 2) }] };
+    }
+  );
+
+  // -------------------- INVOICES --------------------
+
+  server.tool(
+    "list_invoices",
+    "List invoices with pagination",
+    paginationSchema.shape,
+    async ({ startPosition, maxResults }) => {
+      const sql = `SELECT * FROM Invoice ORDER BY Metadata.LastUpdatedTime DESC STARTPOSITION ${startPosition} MAXRESULTS ${maxResults}`;
+      const data: any = await qbQuery(sql);
+      const invoices = data?.QueryResponse?.Invoice ?? [];
+      return { content: [{ type: "text", text: JSON.stringify(invoices, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "get_invoice_by_id",
+    "Fetch an invoice by ID",
+    { invoiceId: z.string().min(1) },
+    async ({ invoiceId }) => {
+      const data: any = await qbRequest(`invoice/${invoiceId}`);
+      const invoice = data?.Invoice ?? data;
+      return { content: [{ type: "text", text: JSON.stringify(invoice, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "search_invoices",
+    "Search invoices by customer, date range, or status",
+    {
+      startPosition: paginationSchema.shape.startPosition,
+      maxResults: paginationSchema.shape.maxResults,
+      customerId: z.string().optional().describe("Filter by customer ID"),
+      customerName: z.string().optional().describe("Filter by customer name (partial match)"),
+      startDate: z.string().optional().describe("Filter invoices from this date (YYYY-MM-DD)"),
+      endDate: z.string().optional().describe("Filter invoices up to this date (YYYY-MM-DD)"),
+      status: z.enum(["Paid", "Open", "Overdue", "Pending"]).optional().describe("Filter by balance status"),
+    },
+    async (params) => {
+      const { customerId, customerName, startDate, endDate, status, startPosition, maxResults } = params;
+      const esc = (s: string) => s.replace(/'/g, "\\'");
+      const conditions: string[] = [];
+
+      if (customerId) conditions.push(`CustomerRef = '${esc(customerId)}'`);
+      if (customerName) conditions.push(`CustomerRef.name LIKE '%${esc(customerName)}%'`);
+      if (startDate) conditions.push(`TxnDate >= '${startDate}'`);
+      if (endDate) conditions.push(`TxnDate <= '${endDate}'`);
+      if (status === "Paid") conditions.push("Balance = '0'");
+      if (status === "Open") conditions.push("Balance > '0'");
+
+      const where = conditions.length ? ` WHERE ${conditions.join(" AND ")}` : "";
+      const sql = `SELECT * FROM Invoice${where} ORDER BY Metadata.LastUpdatedTime DESC STARTPOSITION ${startPosition} MAXRESULTS ${maxResults}`;
+      const data: any = await qbQuery(sql);
+      const invoices = data?.QueryResponse?.Invoice ?? [];
+      return { content: [{ type: "text", text: JSON.stringify(invoices, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "create_invoice",
+    "Create a new invoice for a customer",
+    {
+      customerId: z.string().min(1).describe("The customer ID to invoice"),
+      lineItems: z.array(z.object({
+        description: z.string().optional(),
+        amount: z.number().describe("Line total amount"),
+        detailType: z.enum(["SalesItemLineDetail", "DescriptionOnly"]).default("SalesItemLineDetail"),
+        itemId: z.string().optional().describe("Item/Service ID if SalesItemLineDetail"),
+        quantity: z.number().optional(),
+        unitPrice: z.number().optional(),
+      })).min(1).describe("Invoice line items"),
+      dueDate: z.string().optional().describe("Due date (YYYY-MM-DD)"),
+      txnDate: z.string().optional().describe("Transaction date (YYYY-MM-DD)"),
+      privateNote: z.string().optional().describe("Internal memo"),
+      customerMemo: z.string().optional().describe("Message to customer"),
+    },
+    async (input) => {
+      const lines = input.lineItems.map((li, idx) => {
+        const line: any = {
+          Id: String(idx + 1),
+          Amount: li.amount,
+          DetailType: li.detailType,
+        };
+        if (li.detailType === "SalesItemLineDetail") {
+          line.SalesItemLineDetail = {
+            ItemRef: li.itemId ? { value: li.itemId } : undefined,
+            Qty: li.quantity,
+            UnitPrice: li.unitPrice,
+          };
+        }
+        if (li.description) line.Description = li.description;
+        return line;
+      });
+
+      const body: any = {
+        CustomerRef: { value: input.customerId },
+        Line: lines,
+      };
+      if (input.dueDate) body.DueDate = input.dueDate;
+      if (input.txnDate) body.TxnDate = input.txnDate;
+      if (input.privateNote) body.PrivateNote = input.privateNote;
+      if (input.customerMemo) body.CustomerMemo = { value: input.customerMemo };
+
+      const data: any = await qbRequest("invoice", { method: "POST", body });
+      const created = data?.Invoice ?? data;
+      return { content: [{ type: "text", text: JSON.stringify(created, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "update_invoice",
+    "Update an existing invoice",
+    {
+      invoiceId: z.string().min(1),
+      dueDate: z.string().optional().describe("New due date (YYYY-MM-DD)"),
+      privateNote: z.string().optional(),
+      customerMemo: z.string().optional(),
+    },
+    async (input) => {
+      // Fetch existing for SyncToken
+      const existing: any = await qbRequest(`invoice/${input.invoiceId}`);
+      const inv = existing?.Invoice;
+      if (!inv?.Id || inv.SyncToken === undefined) {
+        throw new Error("Could not fetch existing invoice or SyncToken.");
+      }
+
+      const body: any = {
+        Id: inv.Id,
+        SyncToken: inv.SyncToken,
+        sparse: true,
+      };
+      if (input.dueDate) body.DueDate = input.dueDate;
+      if (input.privateNote) body.PrivateNote = input.privateNote;
+      if (input.customerMemo) body.CustomerMemo = { value: input.customerMemo };
+
+      const data: any = await qbRequest("invoice?operation=update", { method: "POST", body });
+      const updated = data?.Invoice ?? data;
+      return { content: [{ type: "text", text: JSON.stringify(updated, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "delete_invoice",
+    "Void/delete an invoice",
+    { invoiceId: z.string().min(1) },
+    async ({ invoiceId }) => {
+      const existing: any = await qbRequest(`invoice/${invoiceId}`);
+      const inv = existing?.Invoice;
+      if (!inv?.Id || inv.SyncToken === undefined) {
+        throw new Error("Could not fetch existing invoice or SyncToken.");
+      }
+
+      const body = { Id: inv.Id, SyncToken: inv.SyncToken };
+      const data: any = await qbRequest("invoice?operation=delete", { method: "POST", body });
+      return { content: [{ type: "text", text: JSON.stringify({ deleted: true, ...data }, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "send_invoice",
+    "Email an invoice to the customer",
+    {
+      invoiceId: z.string().min(1),
+      emailTo: z.string().email().optional().describe("Override recipient email"),
+    },
+    async ({ invoiceId, emailTo }) => {
+      const endpoint = emailTo
+        ? `invoice/${invoiceId}/send?sendTo=${encodeURIComponent(emailTo)}`
+        : `invoice/${invoiceId}/send`;
+      const data: any = await qbRequest(endpoint, { method: "POST" });
+      const sent = data?.Invoice ?? data;
+      return { content: [{ type: "text", text: JSON.stringify({ sent: true, ...sent }, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "get_invoice_pdf",
+    "Get invoice PDF download URL",
+    { invoiceId: z.string().min(1) },
+    async ({ invoiceId }) => {
+      const ctx = ctxStore.getStore();
+      if (!ctx) throw new Error("Missing request context");
+      const row = await getTokens(ctx.userId, "quickbooks");
+      if (!row?.realmId) throw new Error("QuickBooks not connected");
+
+      const pdfUrl = `${QB_API_BASE}/v3/company/${row.realmId}/invoice/${invoiceId}/pdf?minorversion=${MINOR_VERSION}`;
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            invoiceId,
+            pdfUrl,
+            note: "Use Bearer token to download. URL valid with current access token.",
+          }, null, 2)
+        }]
+      };
+    }
+  );
+
+  // -------------------- PAYMENTS --------------------
+
+  server.tool(
+    "list_payments",
+    "List received payments with pagination",
+    paginationSchema.shape,
+    async ({ startPosition, maxResults }) => {
+      const sql = `SELECT * FROM Payment ORDER BY Metadata.LastUpdatedTime DESC STARTPOSITION ${startPosition} MAXRESULTS ${maxResults}`;
+      const data: any = await qbQuery(sql);
+      const payments = data?.QueryResponse?.Payment ?? [];
+      return { content: [{ type: "text", text: JSON.stringify(payments, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "get_payment_by_id",
+    "Fetch a payment by ID",
+    { paymentId: z.string().min(1) },
+    async ({ paymentId }) => {
+      const data: any = await qbRequest(`payment/${paymentId}`);
+      const payment = data?.Payment ?? data;
+      return { content: [{ type: "text", text: JSON.stringify(payment, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "create_payment",
+    "Record a customer payment",
+    {
+      customerId: z.string().min(1).describe("Customer ID making the payment"),
+      totalAmount: z.number().describe("Total payment amount"),
+      paymentMethodRef: z.string().optional().describe("Payment method ID (Cash, Check, Credit Card, etc.)"),
+      depositToAccountId: z.string().optional().describe("Account ID to deposit payment to"),
+      invoiceIds: z.array(z.string()).optional().describe("Invoice IDs this payment applies to"),
+      txnDate: z.string().optional().describe("Payment date (YYYY-MM-DD)"),
+      privateNote: z.string().optional(),
+    },
+    async (input) => {
+      const body: any = {
+        CustomerRef: { value: input.customerId },
+        TotalAmt: input.totalAmount,
+      };
+      if (input.paymentMethodRef) body.PaymentMethodRef = { value: input.paymentMethodRef };
+      if (input.depositToAccountId) body.DepositToAccountRef = { value: input.depositToAccountId };
+      if (input.txnDate) body.TxnDate = input.txnDate;
+      if (input.privateNote) body.PrivateNote = input.privateNote;
+
+      if (input.invoiceIds?.length) {
+        body.Line = input.invoiceIds.map((invId) => ({
+          Amount: input.totalAmount / input.invoiceIds!.length, // split evenly or adjust as needed
+          LinkedTxn: [{ TxnId: invId, TxnType: "Invoice" }],
+        }));
+      }
+
+      const data: any = await qbRequest("payment", { method: "POST", body });
+      const created = data?.Payment ?? data;
+      return { content: [{ type: "text", text: JSON.stringify(created, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "update_payment",
+    "Update an existing payment",
+    {
+      paymentId: z.string().min(1),
+      totalAmount: z.number().optional(),
+      privateNote: z.string().optional(),
+    },
+    async (input) => {
+      const existing: any = await qbRequest(`payment/${input.paymentId}`);
+      const pay = existing?.Payment;
+      if (!pay?.Id || pay.SyncToken === undefined) {
+        throw new Error("Could not fetch existing payment or SyncToken.");
+      }
+
+      const body: any = {
+        Id: pay.Id,
+        SyncToken: pay.SyncToken,
+        sparse: true,
+      };
+      if (input.totalAmount !== undefined) body.TotalAmt = input.totalAmount;
+      if (input.privateNote) body.PrivateNote = input.privateNote;
+
+      const data: any = await qbRequest("payment?operation=update", { method: "POST", body });
+      const updated = data?.Payment ?? data;
+      return { content: [{ type: "text", text: JSON.stringify(updated, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "void_payment",
+    "Void a payment",
+    { paymentId: z.string().min(1) },
+    async ({ paymentId }) => {
+      const existing: any = await qbRequest(`payment/${paymentId}`);
+      const pay = existing?.Payment;
+      if (!pay?.Id || pay.SyncToken === undefined) {
+        throw new Error("Could not fetch existing payment or SyncToken.");
+      }
+
+      const body = { Id: pay.Id, SyncToken: pay.SyncToken };
+      const data: any = await qbRequest("payment?operation=delete", { method: "POST", body });
+      return { content: [{ type: "text", text: JSON.stringify({ voided: true, ...data }, null, 2) }] };
+    }
+  );
+
+  // -------------------- VENDORS --------------------
+
+  server.tool(
+    "list_vendors",
+    "List vendors with pagination",
+    paginationSchema.shape,
+    async ({ startPosition, maxResults }) => {
+      const sql = `SELECT * FROM Vendor ORDER BY Metadata.LastUpdatedTime DESC STARTPOSITION ${startPosition} MAXRESULTS ${maxResults}`;
+      const data: any = await qbQuery(sql);
+      const vendors = data?.QueryResponse?.Vendor ?? [];
+      return { content: [{ type: "text", text: JSON.stringify(vendors, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "get_vendor_by_id",
+    "Fetch a vendor by ID",
+    { vendorId: z.string().min(1) },
+    async ({ vendorId }) => {
+      const data: any = await qbRequest(`vendor/${vendorId}`);
+      const vendor = data?.Vendor ?? data;
+      return { content: [{ type: "text", text: JSON.stringify(vendor, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "search_vendors",
+    "Search vendors by name or other criteria",
+    {
+      startPosition: paginationSchema.shape.startPosition,
+      maxResults: paginationSchema.shape.maxResults,
+      displayName: z.string().optional(),
+      companyName: z.string().optional(),
+      activeOnly: z.boolean().default(true),
+    },
+    async (params) => {
+      const { displayName, companyName, activeOnly, startPosition, maxResults } = params;
+      const esc = (s: string) => s.replace(/'/g, "\\'");
+      const conditions: string[] = [];
+
+      if (typeof activeOnly === "boolean") conditions.push(`Active = ${activeOnly ? "true" : "false"}`);
+      if (displayName) conditions.push(`DisplayName LIKE '${esc(displayName)}%'`);
+      if (companyName) conditions.push(`CompanyName LIKE '${esc(companyName)}%'`);
+
+      const where = conditions.length ? ` WHERE ${conditions.join(" AND ")}` : "";
+      const sql = `SELECT * FROM Vendor${where} ORDER BY Metadata.LastUpdatedTime DESC STARTPOSITION ${startPosition} MAXRESULTS ${maxResults}`;
+      const data: any = await qbQuery(sql);
+      const vendors = data?.QueryResponse?.Vendor ?? [];
+      return { content: [{ type: "text", text: JSON.stringify(vendors, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "create_vendor",
+    "Create a new vendor",
+    {
+      displayName: z.string().min(1),
+      companyName: z.string().optional(),
+      givenName: z.string().optional(),
+      familyName: z.string().optional(),
+      primaryEmail: z.string().email().optional(),
+      primaryPhone: z.string().optional(),
+      notes: z.string().optional(),
+    },
+    async (input) => {
+      const body: any = { DisplayName: input.displayName };
+      if (input.companyName) body.CompanyName = input.companyName;
+      if (input.givenName) body.GivenName = input.givenName;
+      if (input.familyName) body.FamilyName = input.familyName;
+      if (input.primaryEmail) body.PrimaryEmailAddr = { Address: input.primaryEmail };
+      if (input.primaryPhone) body.PrimaryPhone = { FreeFormNumber: input.primaryPhone };
+      if (input.notes) body.Notes = input.notes;
+
+      const data: any = await qbRequest("vendor", { method: "POST", body });
+      const created = data?.Vendor ?? data;
+      return { content: [{ type: "text", text: JSON.stringify(created, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "update_vendor",
+    "Update an existing vendor",
+    {
+      vendorId: z.string().min(1),
+      displayName: z.string().optional(),
+      companyName: z.string().optional(),
+      primaryEmail: z.string().email().optional(),
+      primaryPhone: z.string().optional(),
+      notes: z.string().optional(),
+    },
+    async (input) => {
+      const existing: any = await qbRequest(`vendor/${input.vendorId}`);
+      const ven = existing?.Vendor;
+      if (!ven?.Id || ven.SyncToken === undefined) {
+        throw new Error("Could not fetch existing vendor or SyncToken.");
+      }
+
+      const body: any = {
+        Id: ven.Id,
+        SyncToken: ven.SyncToken,
+        sparse: true,
+      };
+      if (input.displayName) body.DisplayName = input.displayName;
+      if (input.companyName) body.CompanyName = input.companyName;
+      if (input.primaryEmail) body.PrimaryEmailAddr = { Address: input.primaryEmail };
+      if (input.primaryPhone) body.PrimaryPhone = { FreeFormNumber: input.primaryPhone };
+      if (input.notes) body.Notes = input.notes;
+
+      const data: any = await qbRequest("vendor?operation=update", { method: "POST", body });
+      const updated = data?.Vendor ?? data;
+      return { content: [{ type: "text", text: JSON.stringify(updated, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "set_vendor_active",
+    "Activate or deactivate a vendor",
+    { vendorId: z.string().min(1), active: z.boolean() },
+    async ({ vendorId, active }) => {
+      const existing: any = await qbRequest(`vendor/${vendorId}`);
+      const ven = existing?.Vendor;
+      if (!ven?.Id || ven.SyncToken === undefined) {
+        throw new Error("Could not fetch existing vendor or SyncToken.");
+      }
+
+      const body = {
+        Id: ven.Id,
+        SyncToken: ven.SyncToken,
+        sparse: true,
+        Active: active,
+      };
+      const data: any = await qbRequest("vendor?operation=update", { method: "POST", body });
+      const updated = data?.Vendor ?? data;
+      return { content: [{ type: "text", text: JSON.stringify(updated, null, 2) }] };
+    }
+  );
+
+  // -------------------- BILLS --------------------
+
+  server.tool(
+    "list_bills",
+    "List bills/payables with pagination",
+    paginationSchema.shape,
+    async ({ startPosition, maxResults }) => {
+      const sql = `SELECT * FROM Bill ORDER BY Metadata.LastUpdatedTime DESC STARTPOSITION ${startPosition} MAXRESULTS ${maxResults}`;
+      const data: any = await qbQuery(sql);
+      const bills = data?.QueryResponse?.Bill ?? [];
+      return { content: [{ type: "text", text: JSON.stringify(bills, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "get_bill_by_id",
+    "Fetch a bill by ID",
+    { billId: z.string().min(1) },
+    async ({ billId }) => {
+      const data: any = await qbRequest(`bill/${billId}`);
+      const bill = data?.Bill ?? data;
+      return { content: [{ type: "text", text: JSON.stringify(bill, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "create_bill",
+    "Create a bill from a vendor",
+    {
+      vendorId: z.string().min(1).describe("Vendor ID"),
+      lineItems: z.array(z.object({
+        amount: z.number(),
+        description: z.string().optional(),
+        accountId: z.string().optional().describe("Expense account ID"),
+      })).min(1),
+      dueDate: z.string().optional().describe("Due date (YYYY-MM-DD)"),
+      txnDate: z.string().optional().describe("Bill date (YYYY-MM-DD)"),
+      privateNote: z.string().optional(),
+    },
+    async (input) => {
+      const lines = input.lineItems.map((li, idx) => {
+        const line: any = {
+          Id: String(idx + 1),
+          Amount: li.amount,
+          DetailType: "AccountBasedExpenseLineDetail",
+          AccountBasedExpenseLineDetail: {},
+        };
+        if (li.accountId) {
+          line.AccountBasedExpenseLineDetail.AccountRef = { value: li.accountId };
+        }
+        if (li.description) line.Description = li.description;
+        return line;
+      });
+
+      const body: any = {
+        VendorRef: { value: input.vendorId },
+        Line: lines,
+      };
+      if (input.dueDate) body.DueDate = input.dueDate;
+      if (input.txnDate) body.TxnDate = input.txnDate;
+      if (input.privateNote) body.PrivateNote = input.privateNote;
+
+      const data: any = await qbRequest("bill", { method: "POST", body });
+      const created = data?.Bill ?? data;
+      return { content: [{ type: "text", text: JSON.stringify(created, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "update_bill",
+    "Update an existing bill",
+    {
+      billId: z.string().min(1),
+      dueDate: z.string().optional(),
+      privateNote: z.string().optional(),
+    },
+    async (input) => {
+      const existing: any = await qbRequest(`bill/${input.billId}`);
+      const bill = existing?.Bill;
+      if (!bill?.Id || bill.SyncToken === undefined) {
+        throw new Error("Could not fetch existing bill or SyncToken.");
+      }
+
+      const body: any = {
+        Id: bill.Id,
+        SyncToken: bill.SyncToken,
+        sparse: true,
+      };
+      if (input.dueDate) body.DueDate = input.dueDate;
+      if (input.privateNote) body.PrivateNote = input.privateNote;
+
+      const data: any = await qbRequest("bill?operation=update", { method: "POST", body });
+      const updated = data?.Bill ?? data;
+      return { content: [{ type: "text", text: JSON.stringify(updated, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "pay_bill",
+    "Record a bill payment",
+    {
+      vendorId: z.string().min(1).describe("Vendor ID"),
+      billIds: z.array(z.string()).min(1).describe("Bill IDs to pay"),
+      totalAmount: z.number().describe("Total payment amount"),
+      paymentAccountId: z.string().describe("Bank account ID to pay from"),
+      txnDate: z.string().optional().describe("Payment date (YYYY-MM-DD)"),
+    },
+    async (input) => {
+      const body: any = {
+        VendorRef: { value: input.vendorId },
+        TotalAmt: input.totalAmount,
+        APAccountRef: { value: input.paymentAccountId },
+        Line: input.billIds.map((billId) => ({
+          Amount: input.totalAmount / input.billIds.length,
+          LinkedTxn: [{ TxnId: billId, TxnType: "Bill" }],
+        })),
+      };
+      if (input.txnDate) body.TxnDate = input.txnDate;
+
+      const data: any = await qbRequest("billpayment", { method: "POST", body });
+      const created = data?.BillPayment ?? data;
+      return { content: [{ type: "text", text: JSON.stringify(created, null, 2) }] };
+    }
+  );
+
+  // -------------------- ITEMS/PRODUCTS --------------------
+
+  server.tool(
+    "list_items",
+    "List products/services with pagination",
+    paginationSchema.shape,
+    async ({ startPosition, maxResults }) => {
+      const sql = `SELECT * FROM Item ORDER BY Metadata.LastUpdatedTime DESC STARTPOSITION ${startPosition} MAXRESULTS ${maxResults}`;
+      const data: any = await qbQuery(sql);
+      const items = data?.QueryResponse?.Item ?? [];
+      return { content: [{ type: "text", text: JSON.stringify(items, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "get_item_by_id",
+    "Fetch an item/product by ID",
+    { itemId: z.string().min(1) },
+    async ({ itemId }) => {
+      const data: any = await qbRequest(`item/${itemId}`);
+      const item = data?.Item ?? data;
+      return { content: [{ type: "text", text: JSON.stringify(item, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "search_items",
+    "Search items by name or type",
+    {
+      startPosition: paginationSchema.shape.startPosition,
+      maxResults: paginationSchema.shape.maxResults,
+      name: z.string().optional(),
+      type: z.enum(["Inventory", "Service", "NonInventory"]).optional(),
+      activeOnly: z.boolean().default(true),
+    },
+    async (params) => {
+      const { name, type, activeOnly, startPosition, maxResults } = params;
+      const esc = (s: string) => s.replace(/'/g, "\\'");
+      const conditions: string[] = [];
+
+      if (typeof activeOnly === "boolean") conditions.push(`Active = ${activeOnly ? "true" : "false"}`);
+      if (name) conditions.push(`Name LIKE '${esc(name)}%'`);
+      if (type) conditions.push(`Type = '${type}'`);
+
+      const where = conditions.length ? ` WHERE ${conditions.join(" AND ")}` : "";
+      const sql = `SELECT * FROM Item${where} ORDER BY Metadata.LastUpdatedTime DESC STARTPOSITION ${startPosition} MAXRESULTS ${maxResults}`;
+      const data: any = await qbQuery(sql);
+      const items = data?.QueryResponse?.Item ?? [];
+      return { content: [{ type: "text", text: JSON.stringify(items, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "create_item",
+    "Create an inventory or service item",
+    {
+      name: z.string().min(1),
+      type: z.enum(["Inventory", "Service", "NonInventory"]).default("Service"),
+      description: z.string().optional(),
+      unitPrice: z.number().optional().describe("Sales price"),
+      purchaseCost: z.number().optional().describe("Purchase cost for inventory"),
+      incomeAccountId: z.string().optional().describe("Income account ID"),
+      expenseAccountId: z.string().optional().describe("Expense/COGS account ID"),
+      assetAccountId: z.string().optional().describe("Inventory asset account ID (for Inventory type)"),
+      qtyOnHand: z.number().optional().describe("Initial quantity for inventory items"),
+      invStartDate: z.string().optional().describe("Inventory start date (YYYY-MM-DD)"),
+    },
+    async (input) => {
+      const body: any = {
+        Name: input.name,
+        Type: input.type,
+      };
+      if (input.description) body.Description = input.description;
+      if (input.unitPrice !== undefined) body.UnitPrice = input.unitPrice;
+      if (input.purchaseCost !== undefined) body.PurchaseCost = input.purchaseCost;
+      if (input.incomeAccountId) body.IncomeAccountRef = { value: input.incomeAccountId };
+      if (input.expenseAccountId) body.ExpenseAccountRef = { value: input.expenseAccountId };
+      if (input.assetAccountId) body.AssetAccountRef = { value: input.assetAccountId };
+      if (input.qtyOnHand !== undefined) body.QtyOnHand = input.qtyOnHand;
+      if (input.invStartDate) body.InvStartDate = input.invStartDate;
+
+      const data: any = await qbRequest("item", { method: "POST", body });
+      const created = data?.Item ?? data;
+      return { content: [{ type: "text", text: JSON.stringify(created, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "update_item",
+    "Update an existing item",
+    {
+      itemId: z.string().min(1),
+      name: z.string().optional(),
+      description: z.string().optional(),
+      unitPrice: z.number().optional(),
+      purchaseCost: z.number().optional(),
+    },
+    async (input) => {
+      const existing: any = await qbRequest(`item/${input.itemId}`);
+      const item = existing?.Item;
+      if (!item?.Id || item.SyncToken === undefined) {
+        throw new Error("Could not fetch existing item or SyncToken.");
+      }
+
+      const body: any = {
+        Id: item.Id,
+        SyncToken: item.SyncToken,
+        sparse: true,
+      };
+      if (input.name) body.Name = input.name;
+      if (input.description) body.Description = input.description;
+      if (input.unitPrice !== undefined) body.UnitPrice = input.unitPrice;
+      if (input.purchaseCost !== undefined) body.PurchaseCost = input.purchaseCost;
+
+      const data: any = await qbRequest("item?operation=update", { method: "POST", body });
+      const updated = data?.Item ?? data;
+      return { content: [{ type: "text", text: JSON.stringify(updated, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "set_item_active",
+    "Activate or deactivate an item",
+    { itemId: z.string().min(1), active: z.boolean() },
+    async ({ itemId, active }) => {
+      const existing: any = await qbRequest(`item/${itemId}`);
+      const item = existing?.Item;
+      if (!item?.Id || item.SyncToken === undefined) {
+        throw new Error("Could not fetch existing item or SyncToken.");
+      }
+
+      const body = {
+        Id: item.Id,
+        SyncToken: item.SyncToken,
+        sparse: true,
+        Active: active,
+      };
+      const data: any = await qbRequest("item?operation=update", { method: "POST", body });
+      const updated = data?.Item ?? data;
+      return { content: [{ type: "text", text: JSON.stringify(updated, null, 2) }] };
+    }
+  );
+
+  // -------------------- REPORTS --------------------
+
+  server.tool(
+    "get_profit_loss",
+    "Get Profit and Loss report",
+    {
+      startDate: z.string().optional().describe("Start date (YYYY-MM-DD)"),
+      endDate: z.string().optional().describe("End date (YYYY-MM-DD)"),
+      accountingMethod: z.enum(["Cash", "Accrual"]).optional().default("Accrual"),
+    },
+    async (params) => {
+      const queryParams = new URLSearchParams();
+      if (params.startDate) queryParams.set("start_date", params.startDate);
+      if (params.endDate) queryParams.set("end_date", params.endDate);
+      if (params.accountingMethod) queryParams.set("accounting_method", params.accountingMethod);
+
+      const endpoint = `reports/ProfitAndLoss${queryParams.toString() ? "?" + queryParams.toString() : ""}`;
+      const data: any = await qbRequest(endpoint);
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "get_balance_sheet",
+    "Get Balance Sheet report",
+    {
+      startDate: z.string().optional().describe("Start date (YYYY-MM-DD)"),
+      endDate: z.string().optional().describe("End date (YYYY-MM-DD)"),
+      accountingMethod: z.enum(["Cash", "Accrual"]).optional().default("Accrual"),
+    },
+    async (params) => {
+      const queryParams = new URLSearchParams();
+      if (params.startDate) queryParams.set("start_date", params.startDate);
+      if (params.endDate) queryParams.set("end_date", params.endDate);
+      if (params.accountingMethod) queryParams.set("accounting_method", params.accountingMethod);
+
+      const endpoint = `reports/BalanceSheet${queryParams.toString() ? "?" + queryParams.toString() : ""}`;
+      const data: any = await qbRequest(endpoint);
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "get_cash_flow",
+    "Get Cash Flow statement",
+    {
+      startDate: z.string().optional().describe("Start date (YYYY-MM-DD)"),
+      endDate: z.string().optional().describe("End date (YYYY-MM-DD)"),
+    },
+    async (params) => {
+      const queryParams = new URLSearchParams();
+      if (params.startDate) queryParams.set("start_date", params.startDate);
+      if (params.endDate) queryParams.set("end_date", params.endDate);
+
+      const endpoint = `reports/CashFlow${queryParams.toString() ? "?" + queryParams.toString() : ""}`;
+      const data: any = await qbRequest(endpoint);
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "get_ar_aging",
+    "Get Accounts Receivable Aging Summary",
+    {
+      reportDate: z.string().optional().describe("Report as of date (YYYY-MM-DD)"),
+    },
+    async (params) => {
+      const queryParams = new URLSearchParams();
+      if (params.reportDate) queryParams.set("report_date", params.reportDate);
+
+      const endpoint = `reports/AgedReceivables${queryParams.toString() ? "?" + queryParams.toString() : ""}`;
+      const data: any = await qbRequest(endpoint);
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "get_ap_aging",
+    "Get Accounts Payable Aging Summary",
+    {
+      reportDate: z.string().optional().describe("Report as of date (YYYY-MM-DD)"),
+    },
+    async (params) => {
+      const queryParams = new URLSearchParams();
+      if (params.reportDate) queryParams.set("report_date", params.reportDate);
+
+      const endpoint = `reports/AgedPayables${queryParams.toString() ? "?" + queryParams.toString() : ""}`;
+      const data: any = await qbRequest(endpoint);
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+    }
+  );
+
+  server.tool(
+    "get_trial_balance",
+    "Get Trial Balance report",
+    {
+      startDate: z.string().optional().describe("Start date (YYYY-MM-DD)"),
+      endDate: z.string().optional().describe("End date (YYYY-MM-DD)"),
+    },
+    async (params) => {
+      const queryParams = new URLSearchParams();
+      if (params.startDate) queryParams.set("start_date", params.startDate);
+      if (params.endDate) queryParams.set("end_date", params.endDate);
+
+      const endpoint = `reports/TrialBalance${queryParams.toString() ? "?" + queryParams.toString() : ""}`;
+      const data: any = await qbRequest(endpoint);
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
     }
   );
 

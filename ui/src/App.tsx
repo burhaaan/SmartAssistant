@@ -1,10 +1,12 @@
 ﻿import React, { useMemo, useState } from "react";
-import { Link, Route, Routes, useLocation } from "react-router-dom";
+import { Link, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import ChatBox from "./components/ChatBox";
 import SMSInterface from "./components/SMSInterface";
 import GmailInterface from "./components/GmailInterface";
 import PrivacyPolicy from "./pages/PrivacyPolicy";
 import EndUserLicense from "./pages/EndUserLicense";
+import AuthPage from "./components/AuthPage";
+import { AuthProvider, useAuth } from "./contexts/AuthContext";
 import "./styles/global.css";
 
 const navLinks = [
@@ -13,14 +15,134 @@ const navLinks = [
   { to: "/eula", label: "EULA" },
 ];
 
+// Protected route wrapper
+function ProtectedRoute({ children }: { children: React.ReactNode }) {
+  const { user, loading } = useAuth();
+
+  if (loading) {
+    return (
+      <div
+        style={{
+          minHeight: "100vh",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          background: "linear-gradient(135deg, #0a0a0a 0%, #1a1a2e 40%, #16213e 100%)",
+          color: "white",
+        }}
+      >
+        <div style={{ textAlign: "center" }}>
+          <div
+            style={{
+              width: 48,
+              height: 48,
+              border: "3px solid rgba(139, 92, 246, 0.3)",
+              borderTop: "3px solid #8b5cf6",
+              borderRadius: "50%",
+              animation: "spin 1s linear infinite",
+              margin: "0 auto 16px",
+            }}
+          />
+          <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+          <p style={{ color: "rgba(255, 255, 255, 0.7)" }}>Loading...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <Navigate to="/login" replace />;
+  }
+
+  return <>{children}</>;
+}
+
 export default function App() {
+  return (
+    <AuthProvider>
+      <AppRoutes />
+    </AuthProvider>
+  );
+}
+
+function UserMenu() {
+  const { user, signOut } = useAuth();
+  const navigate = useNavigate();
+
+  if (!user) {
+    return (
+      <Link
+        to="/login"
+        style={{
+          padding: "8px 16px",
+          borderRadius: "8px",
+          background: "linear-gradient(135deg, #8b5cf6 0%, #ec4899 100%)",
+          color: "white",
+          textDecoration: "none",
+          fontSize: 13,
+          fontWeight: 600,
+          boxShadow: "0 4px 12px rgba(139, 92, 246, 0.3)",
+          transition: "all 0.2s ease",
+        }}
+      >
+        Sign In
+      </Link>
+    );
+  }
+
+  const handleLogout = async () => {
+    await signOut();
+    navigate("/login");
+  };
+
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+      <span
+        style={{
+          fontSize: 13,
+          color: "rgba(255, 255, 255, 0.7)",
+          maxWidth: 140,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+        }}
+      >
+        {user.email}
+      </span>
+      <button
+        onClick={handleLogout}
+        style={{
+          padding: "8px 16px",
+          borderRadius: "8px",
+          background: "rgba(255, 255, 255, 0.1)",
+          border: "1px solid rgba(255, 255, 255, 0.15)",
+          color: "rgba(255, 255, 255, 0.8)",
+          fontSize: 13,
+          fontWeight: 500,
+          cursor: "pointer",
+          transition: "all 0.2s ease",
+        }}
+      >
+        Sign Out
+      </button>
+    </div>
+  );
+}
+
+function AppRoutes() {
   const location = useLocation();
+  const { user } = useAuth();
   const activePath = useMemo(() => {
     if (location.pathname === "/") return "/";
     if (location.pathname.startsWith("/privacy")) return "/privacy";
     if (location.pathname.startsWith("/eula")) return "/eula";
     return "/";
   }, [location.pathname]);
+
+  // If on login page and already authenticated, redirect to home
+  if (location.pathname === "/login" && user) {
+    return <Navigate to="/" replace />;
+  }
 
   return (
     <div
@@ -231,6 +353,7 @@ export default function App() {
               Online
             </span>
           </div>
+          <UserMenu />
         </div>
       </header>
 
@@ -246,7 +369,15 @@ export default function App() {
       >
         <div style={{ width: "100%", maxWidth: "1200px", padding: "32px 0 48px" }}>
           <Routes>
-            <Route path="/" element={<Dashboard />} />
+            <Route path="/login" element={<AuthPage />} />
+            <Route
+              path="/"
+              element={
+                <ProtectedRoute>
+                  <Dashboard />
+                </ProtectedRoute>
+              }
+            />
             <Route path="/privacy" element={<PrivacyPolicy />} />
             <Route path="/eula" element={<EndUserLicense />} />
           </Routes>
