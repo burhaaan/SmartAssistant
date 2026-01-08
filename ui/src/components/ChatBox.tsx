@@ -749,7 +749,7 @@ export default function ChatBox() {
                         <span style={{ color: "#10a37f", fontSize: 13, fontWeight: 600 }}>QuickBooks</span>
                       </div>
                       <p style={{ margin: 0, fontSize: 12, color: "rgba(255,255,255,0.6)", lineHeight: 1.5 }}>
-                        Invoices, Payments, Customers, Vendors, Bills, Reports (P&L, Balance Sheet), Items/Products
+                        Financial statements, Banking, and Supporting accounts (chart of accounts, balances)
                       </p>
                     </div>
                     <div style={{ marginBottom: 12 }}>
